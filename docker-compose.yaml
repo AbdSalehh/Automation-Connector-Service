@@ -6,10 +6,8 @@ services:
       - "3001:3001"
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
+    env_file:
+      - .env
     environment:
-      - PORT=3001
-      - API_KEY=secretkuncirahasiaAnda
-      - AUTOFLOW_WEBHOOK_URL=https://automation-app-three.vercel.app/api/webhooks/baileys
-      - AUTH_FOLDER=./auth_info_baileys
       - NODE_ENV=production
     restart: unless-stopped
