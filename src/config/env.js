@@ -7,6 +7,9 @@ export const env = {
   apiKey: process.env.API_KEY || "",
   autoflowWebhookUrl: process.env.AUTOFLOW_WEBHOOK_URL || "",
   authFolder: process.env.AUTH_FOLDER || "./auth_info_baileys",
+  corsOrigins: process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(",").map((origin) => origin.trim())
+    : ["http://localhost:3000"],
 };
 
 /**

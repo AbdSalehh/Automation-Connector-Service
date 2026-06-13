@@ -1,5 +1,7 @@
 import express from "express";
+import cors from "cors";
 
+import { env } from "./config/env.js";
 import { messageRouter } from "./routes/message.routes.js";
 import { sessionRouter } from "./routes/session.routes.js";
 import { sendSuccess, sendError } from "./lib/apiResponse.js";
@@ -9,6 +11,11 @@ import { logger } from "./config/logger.js";
 export const createApp = () => {
   const app = express();
 
+  app.use(
+    cors({
+      origin: env.corsOrigins,
+    }),
+  );
   app.use(express.json());
 
   /**
