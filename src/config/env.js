@@ -3,10 +3,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 export const env = {
-  port: process.env.PORT || 3001,
-  apiKey: process.env.API_KEY || "",
-  autoflowWebhookUrl: process.env.AUTOFLOW_WEBHOOK_URL || "",
-  authFolder: process.env.AUTH_FOLDER || "./auth_info_baileys",
+  port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3001,
+  apiKey: (process.env.API_KEY || "").trim(),
+  autoflowWebhookUrl: (process.env.AUTOFLOW_WEBHOOK_URL || "").trim(),
+  authFolder: (process.env.AUTH_FOLDER || "./auth_info_baileys").trim(),
   corsOrigins: process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(",").map((origin) => origin.trim())
     : ["http://localhost:3000"],
