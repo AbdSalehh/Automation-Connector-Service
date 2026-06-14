@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
+    "ably": "^2.5.0",
     "axios": "^1.7.9",
     "cors": "^2.8.6",
     "dotenv": "^16.4.7",

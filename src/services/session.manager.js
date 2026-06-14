@@ -13,6 +13,10 @@ import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import { extractNumberFromJid, toWhatsappJid } from "../lib/phoneNumber.js";
 import { forwardInboundMessage } from "./webhook.service.js";
+import {
+  publishInboundMessage,
+  publishSessionUpdate,
+} from "./realtime.service.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -135,14 +139,22 @@ const createIncomingMessageHandler = (sessionId) => {
 
       logger.info({ sessionId, sender }, "Pesan masuk diterima dari WhatsApp");
 
-      await forwardInboundMessage({
+      const inboundPayload = {
         sessionId,
         sender,
         message: messageText,
         name: senderName,
         sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
         receivedAt: new Date().toISOString(),
-      });
+      };
+
+      /**
+       * Teruskan ke webhook engine (menggerakkan workflow) dan publikasikan ke
+       * Ably (UI realtime) secara berdampingan. Keduanya memakai payload sama.
+       */
+      await forwardInboundMessage(inboundPayload);
+
+      await publishInboundMessage(sessionId, inboundPayload);
     }
   };
 };
@@ -177,6 +189,8 @@ const createConnectionUpdateHandler = (sessionId) => {
           "Gagal mengubah QR code menjadi data URL",
         );
       }
+
+      await publishSessionUpdate(sessionId, getSessionStatus(sessionId));
     }
 
     if (connection === "open") {
@@ -195,6 +209,8 @@ const createConnectionUpdateHandler = (sessionId) => {
       );
 
       await logoutDuplicateSessions(sessionId, session.phoneNumber);
+
+      await publishSessionUpdate(sessionId, getSessionStatus(sessionId));
     }
 
     if (connection === "close") {
@@ -208,6 +224,8 @@ const createConnectionUpdateHandler = (sessionId) => {
         { sessionId, statusCode, shouldReconnect },
         "Koneksi WhatsApp terputus",
       );
+
+      await publishSessionUpdate(sessionId, getSessionStatus(sessionId));
 
       if (shouldReconnect) {
         startSession(sessionId);
@@ -413,6 +431,17 @@ export const deleteSession = async (sessionId) => {
   }
 
   removeSessionAuthFolder(sessionId);
+
+  /**
+   * Sesi sudah dihapus dari memori sehingga getSessionStatus mengembalikan
+   * null. Kirim payload status eksplisit agar frontend dapat mereset tampilan.
+   */
+  await publishSessionUpdate(sessionId, {
+    status: "deleted",
+    isReady: false,
+    qr: null,
+    user: null,
+  });
 };
 
 /**
