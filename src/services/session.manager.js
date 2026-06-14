@@ -30,10 +30,62 @@ const getSessionAuthFolder = (sessionId) => {
 };
 
 /**
- * Membaca isi teks dari berbagai kemungkinan struktur pesan WhatsApp,
- * baik pesan teks biasa maupun pesan teks dengan konteks tambahan.
+ * Mengubah timestamp Unix (detik) dari Baileys menjadi string ISO.
+ * Nilai dapat berupa number maupun objek Long, sehingga keduanya ditangani.
  */
-const extractMessageText = (messageContent) => {
+const convertUnixToIso = (timestamp) => {
+  if (!timestamp) {
+    return null;
+  }
+
+  const seconds =
+    typeof timestamp === "number"
+      ? timestamp
+      : (timestamp.toNumber?.() ?? Number(timestamp));
+
+  if (!seconds) {
+    return null;
+  }
+
+  return new Date(seconds * 1000).toISOString();
+};
+
+/**
+ * Membuka lapisan pembungkus pesan WhatsApp seperti pesan sementara
+ * (ephemeral) atau pesan sekali lihat (view once) agar isi pesan
+ * yang sebenarnya bisa dibaca.
+ */
+const unwrapMessage = (messageContent) => {
+  if (!messageContent) {
+    return null;
+  }
+
+  if (messageContent.ephemeralMessage) {
+    return unwrapMessage(messageContent.ephemeralMessage.message);
+  }
+
+  if (messageContent.viewOnceMessage) {
+    return unwrapMessage(messageContent.viewOnceMessage.message);
+  }
+
+  if (messageContent.viewOnceMessageV2) {
+    return unwrapMessage(messageContent.viewOnceMessageV2.message);
+  }
+
+  if (messageContent.documentWithCaptionMessage) {
+    return unwrapMessage(messageContent.documentWithCaptionMessage.message);
+  }
+
+  return messageContent;
+};
+
+/**
+ * Membaca isi teks dari berbagai kemungkinan struktur pesan WhatsApp:
+ * teks biasa, balasan (reply), caption media, maupun balasan tombol.
+ */
+const extractMessageText = (rawMessageContent) => {
+  const messageContent = unwrapMessage(rawMessageContent);
+
   if (!messageContent) {
     return "";
   }
@@ -41,6 +93,12 @@ const extractMessageText = (messageContent) => {
   return (
     messageContent.conversation ||
     messageContent.extendedTextMessage?.text ||
+    messageContent.imageMessage?.caption ||
+    messageContent.videoMessage?.caption ||
+    messageContent.documentMessage?.caption ||
+    messageContent.buttonsResponseMessage?.selectedDisplayText ||
+    messageContent.listResponseMessage?.title ||
+    messageContent.templateButtonReplyMessage?.selectedDisplayText ||
     ""
   );
 };
@@ -82,6 +140,7 @@ const createIncomingMessageHandler = (sessionId) => {
         sender,
         message: messageText,
         name: senderName,
+        sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
         receivedAt: new Date().toISOString(),
       });
     }
@@ -123,8 +182,19 @@ const createConnectionUpdateHandler = (sessionId) => {
     if (connection === "open") {
       session.status = "open";
       session.qrDataUrl = null;
+      session.phoneNumber = extractNumberFromJid(
+        session.socket?.user?.id || "",
+      );
+      session.name =
+        session.socket?.user?.name || session.socket?.user?.notify || "";
+      session.connectedAt = new Date().toISOString();
 
-      logger.info({ sessionId }, "Koneksi WhatsApp tersambung");
+      logger.info(
+        { sessionId, phoneNumber: session.phoneNumber },
+        "Koneksi WhatsApp tersambung",
+      );
+
+      await logoutDuplicateSessions(sessionId, session.phoneNumber);
     }
 
     if (connection === "close") {
@@ -174,6 +244,34 @@ const removeSessionAuthFolder = (sessionId) => {
 };
 
 /**
+ * Melakukan logout pada sesi lama yang ternyata memakai nomor WhatsApp
+ * yang sama dengan sesi yang baru saja tersambung. Tujuannya agar satu
+ * nomor WhatsApp hanya aktif pada satu sesi (scan terbaru yang menang).
+ */
+const logoutDuplicateSessions = async (currentSessionId, phoneNumber) => {
+  if (!phoneNumber) {
+    return;
+  }
+
+  for (const [otherSessionId, otherSession] of sessions.entries()) {
+    if (otherSessionId === currentSessionId) {
+      continue;
+    }
+
+    if (otherSession.phoneNumber !== phoneNumber) {
+      continue;
+    }
+
+    logger.warn(
+      { currentSessionId, otherSessionId, phoneNumber },
+      "Nomor WhatsApp sama terdeteksi di sesi lain, melakukan logout sesi lama",
+    );
+
+    await deleteSession(otherSessionId);
+  }
+};
+
+/**
  * Membuat atau memulai ulang sebuah sesi WhatsApp berdasarkan sessionId.
  * Sesi disimpan persisten di folder masing-masing sehingga restart
  * kontainer tidak memaksa logout.
@@ -198,6 +296,9 @@ export const startSession = async (sessionId) => {
     socket,
     status: existingSession?.status || "connecting",
     qrDataUrl: existingSession?.qrDataUrl || null,
+    phoneNumber: existingSession?.phoneNumber || null,
+    name: existingSession?.name || null,
+    connectedAt: existingSession?.connectedAt || null,
   });
 
   socket.ev.on("creds.update", saveCreds);
@@ -222,6 +323,14 @@ export const getSessionStatus = (sessionId) => {
     status: session.status,
     isReady: session.status === "open",
     qr: session.status === "open" ? null : session.qrDataUrl,
+    user:
+      session.status === "open"
+        ? {
+            phoneNumber: session.phoneNumber || null,
+            name: session.name || null,
+            connectedAt: session.connectedAt || null,
+          }
+        : null,
   };
 };
 
@@ -236,6 +345,9 @@ export const getAllSessions = () => {
       sessionId,
       status: session.status,
       isReady: session.status === "open",
+      phoneNumber: session.phoneNumber || null,
+      name: session.name || null,
+      connectedAt: session.connectedAt || null,
     });
   }
 
@@ -283,6 +395,12 @@ export const sendTextMessage = async ({ sessionId, target, message }) => {
 export const deleteSession = async (sessionId) => {
   const session = sessions.get(sessionId);
 
+  /**
+   * Sesi dihapus dari map terlebih dahulu agar event "close" akibat
+   * proses logout tidak memicu reconnect atau restart otomatis.
+   */
+  sessions.delete(sessionId);
+
   if (session?.socket) {
     try {
       await session.socket.logout();
@@ -293,8 +411,6 @@ export const deleteSession = async (sessionId) => {
       );
     }
   }
-
-  sessions.delete(sessionId);
 
   removeSessionAuthFolder(sessionId);
 };

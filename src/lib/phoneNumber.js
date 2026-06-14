@@ -29,7 +29,9 @@ export const extractNumberFromJid = (remoteJid) => {
     return "";
   }
 
-  const [numberPart] = String(remoteJid).split("@");
+  const [beforeAt] = String(remoteJid).split("@");
+
+  const [numberPart] = beforeAt.split(":");
 
   return normalizePhoneNumber(numberPart);
 };

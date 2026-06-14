@@ -12,6 +12,7 @@ export const forwardInboundMessage = async ({
   sender,
   message,
   name,
+  sentAt,
   receivedAt,
 }) => {
   if (!env.autoflowWebhookUrl) {
@@ -25,6 +26,7 @@ export const forwardInboundMessage = async ({
       sender,
       message,
       name,
+      sentAt,
       receivedAt,
     });
 
