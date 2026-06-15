@@ -1,6 +1,10 @@
 import { apiClient } from "../lib/apiClient.js";
 import { logger } from "../config/logger.js";
 import { env } from "../config/env.js";
+import {
+  encryptWebhookJson,
+  isWebhookEncryptionConfigured,
+} from "../lib/webhookCrypto.js";
 
 /**
  * Jumlah percobaan maksimum saat meneruskan pesan ke webhook, beserta
@@ -21,6 +25,10 @@ const sleep = (durationMs) => {
  * Payload memuat sessionId penerima, nomor pengirim, isi pesan,
  * nama pengirim, dan waktu pesan dikirim/diterima.
  *
+ * Bila WEBHOOK_ENCRYPTION_KEY diatur, payload dikirim terenkripsi (AES-256-GCM)
+ * pada satu field `payload`. Bila tidak, dikirim format lama (plaintext) agar
+ * tetap kompatibel mundur.
+ *
  * Pengiriman dicoba ulang beberapa kali dengan backoff eksponensial agar
  * gangguan jaringan sesaat atau cold-start serverless tidak menyebabkan
  * trigger di frontend hilang begitu saja.
@@ -38,7 +46,7 @@ export const forwardInboundMessage = async ({
     return;
   }
 
-  const payload = {
+  const inboundPayload = {
     sessionId,
     sender,
     message,
@@ -47,9 +55,13 @@ export const forwardInboundMessage = async ({
     receivedAt,
   };
 
+  const requestBody = isWebhookEncryptionConfigured()
+    ? { payload: encryptWebhookJson(inboundPayload) }
+    : inboundPayload;
+
   for (let attempt = 1; attempt <= MAX_FORWARD_ATTEMPTS; attempt += 1) {
     try {
-      await apiClient.post(env.autoflowWebhookUrl, payload);
+      await apiClient.post(env.autoflowWebhookUrl, requestBody);
 
       logger.info(
         { sessionId, sender, attempt },

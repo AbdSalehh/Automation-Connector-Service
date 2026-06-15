@@ -11,7 +11,11 @@ import path from "path";
 
 import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
-import { extractNumberFromJid, toWhatsappJid } from "../lib/phoneNumber.js";
+import {
+  extractNumberFromJid,
+  resolveSenderNumber,
+  toWhatsappJid,
+} from "../lib/phoneNumber.js";
 import { forwardInboundMessage } from "./webhook.service.js";
 import {
   publishInboundMessage,
@@ -129,11 +133,20 @@ const createIncomingMessageHandler = (sessionId) => {
         continue;
       }
 
-      const sender = extractNumberFromJid(remoteJid);
+      const sender = resolveSenderNumber(incomingMessage.key);
       const messageText = extractMessageText(incomingMessage.message);
       const senderName = incomingMessage.pushName || "";
 
       if (!messageText) {
+        continue;
+      }
+
+      if (!sender) {
+        logger.warn(
+          { sessionId, remoteJid },
+          "Nomor pengirim tidak dapat diresolusi dari LID, balasan dilewati",
+        );
+
         continue;
       }
 

@@ -11,6 +11,7 @@ export const env = {
     ? process.env.CORS_ORIGINS.split(",").map((origin) => origin.trim())
     : ["http://localhost:3000"],
   ablyApiKey: (process.env.ABLY_API_KEY || "").trim(),
+  webhookEncryptionKey: (process.env.WEBHOOK_ENCRYPTION_KEY || "").trim(),
 };
 
 /**
@@ -33,6 +34,12 @@ export const validateEnv = (logger) => {
   if (!env.ablyApiKey) {
     logger.warn(
       "ABLY_API_KEY belum diatur. Balasan tidak akan dipublikasikan secara realtime ke frontend",
+    );
+  }
+
+  if (!env.webhookEncryptionKey) {
+    logger.warn(
+      "WEBHOOK_ENCRYPTION_KEY belum diatur. Pesan masuk diteruskan ke AutoFlow tanpa enkripsi (format lama)",
     );
   }
 };

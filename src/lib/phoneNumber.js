@@ -35,3 +35,26 @@ export const extractNumberFromJid = (remoteJid) => {
 
   return normalizePhoneNumber(numberPart);
 };
+
+/**
+ * Meresolusi nomor pengirim asli dari sebuah message key Baileys. WhatsApp versi
+ * baru kadang memakai LID (`<digit>@lid`) pada `remoteJid` demi privasi, sehingga
+ * nomor asli harus diambil dari `senderPn` (chat pribadi) atau `participantPn`
+ * (grup). Mengembalikan string kosong bila tidak ada sumber nomor asli.
+ */
+export const resolveSenderNumber = (messageKey) => {
+  const remoteJid = messageKey?.remoteJid ?? "";
+
+  if (remoteJid && !remoteJid.endsWith("@lid")) {
+    return extractNumberFromJid(remoteJid);
+  }
+
+  const phoneNumberJid =
+    messageKey?.senderPn || messageKey?.participantPn || "";
+
+  if (phoneNumberJid) {
+    return extractNumberFromJid(phoneNumberJid);
+  }
+
+  return "";
+};

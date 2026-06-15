@@ -52,6 +52,11 @@ export const publishInboundMessage = async (sessionId, payload) => {
   const client = getAblyClient();
 
   if (!client) {
+    logger.warn(
+      { sessionId },
+      "Lewati publish ke Ably karena ABLY_API_KEY belum diatur di environment",
+    );
+
     return;
   }
 
@@ -84,6 +89,11 @@ export const publishSessionUpdate = async (sessionId, payload) => {
   const client = getAblyClient();
 
   if (!client) {
+    logger.warn(
+      { sessionId },
+      "Lewati publish ke Ably karena ABLY_API_KEY belum diatur di environment",
+    );
+
     return;
   }
 
