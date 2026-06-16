@@ -3,6 +3,7 @@ import {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import qrcodeTerminal from "qrcode-terminal";
 import QRCode from "qrcode";
@@ -21,6 +22,8 @@ import {
   publishInboundMessage,
   publishSessionUpdate,
 } from "./realtime.service.js";
+import { detectMessageType, extractMediaInfo } from "../lib/messageType.js";
+import { uploadInboundMedia } from "./media.service.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -112,9 +115,79 @@ const extractMessageText = (rawMessageContent) => {
 };
 
 /**
+ * Mengunduh byte media dari sebuah pesan lalu mengunggahnya ke Cloudinary.
+ * Ukuran dicek lebih dulu agar berkas melebihi batas tidak ikut diunduh,
+ * sehingga RAM dan bandwidth AWS tetap hemat. Mengembalikan metadata media
+ * (termasuk URL HTTPS) atau null bila dilewati/gagal.
+ */
+const downloadAndUploadMedia = async (
+  incomingMessage,
+  messageContent,
+  messageType,
+  sessionId,
+) => {
+  const mediaInfo = extractMediaInfo(messageContent, messageType);
+
+  if (!mediaInfo) {
+    return null;
+  }
+
+  if (mediaInfo.fileLength > env.mediaMaxBytes) {
+    logger.warn(
+      {
+        sessionId,
+        fileLength: mediaInfo.fileLength,
+        limit: env.mediaMaxBytes,
+      },
+      "Ukuran media melebihi batas, media dilewati",
+    );
+
+    return null;
+  }
+
+  try {
+    const session = sessions.get(sessionId);
+
+    const buffer = await downloadMediaMessage(
+      incomingMessage,
+      "buffer",
+      {},
+      {
+        logger,
+        reuploadRequest: session?.socket?.updateMediaMessage,
+      },
+    );
+
+    if (buffer.length > env.mediaMaxBytes) {
+      logger.warn(
+        { sessionId, bytes: buffer.length, limit: env.mediaMaxBytes },
+        "Ukuran media (setelah unduh) melebihi batas, media dilewati",
+      );
+
+      return null;
+    }
+
+    return await uploadInboundMedia(buffer, {
+      mimetype: mediaInfo.mimetype,
+      fileName: mediaInfo.fileName,
+      resourceType: mediaInfo.resourceType,
+      sessionId,
+    });
+  } catch (error) {
+    logger.error(
+      { err: error?.message, sessionId },
+      "Gagal mengunduh media masuk dari WhatsApp",
+    );
+
+    return null;
+  }
+};
+
+/**
  * Menangani pesan masuk untuk sebuah sesi lalu meneruskannya
  * ke webhook AutoFlow. Pesan dari diri sendiri diabaikan untuk
- * mencegah perulangan tak terbatas.
+ * mencegah perulangan tak terbatas. Media (gambar/video/audio/dokumen)
+ * diunduh lalu diunggah ke Cloudinary, dan URL-nya disertakan di payload.
  */
 const createIncomingMessageHandler = (sessionId) => {
   return async ({ messages, type }) => {
@@ -137,7 +210,12 @@ const createIncomingMessageHandler = (sessionId) => {
       const messageText = extractMessageText(incomingMessage.message);
       const senderName = incomingMessage.pushName || "";
 
-      if (!messageText) {
+      const messageContent = unwrapMessage(incomingMessage.message);
+      const messageType = detectMessageType(messageContent);
+      const isMedia = messageType !== "text";
+
+      /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
+      if (!messageText && !isMedia) {
         continue;
       }
 
@@ -150,13 +228,27 @@ const createIncomingMessageHandler = (sessionId) => {
         continue;
       }
 
-      logger.info({ sessionId, sender }, "Pesan masuk diterima dari WhatsApp");
+      logger.info(
+        { sessionId, sender, messageType },
+        "Pesan masuk diterima dari WhatsApp",
+      );
+
+      const media = isMedia
+        ? await downloadAndUploadMedia(
+            incomingMessage,
+            messageContent,
+            messageType,
+            sessionId,
+          )
+        : null;
 
       const inboundPayload = {
         sessionId,
         sender,
         message: messageText,
         name: senderName,
+        messageType,
+        media,
         sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
         receivedAt: new Date().toISOString(),
       };
@@ -417,6 +509,30 @@ export const sendTextMessage = async ({ sessionId, target, message }) => {
   return {
     messageId: sentMessage?.key?.id || null,
   };
+};
+
+/**
+ * Mengirim status presence (mis. "composing"/sedang mengetik) dari sebuah sesi
+ * ke nomor target. WhatsApp memerlukan subscribe presence terlebih dahulu agar
+ * indikator tampil andal di perangkat penerima. Indikator "composing" hilang
+ * otomatis saat pesan berikutnya terkirim, jadi pengiriman "paused" opsional.
+ */
+export const sendPresence = async ({ sessionId, target, presence }) => {
+  const session = sessions.get(sessionId);
+
+  if (!session || session.status !== "open") {
+    throw new Error(
+      "Sesi WhatsApp belum siap, silakan scan QR terlebih dahulu",
+    );
+  }
+
+  const { socket } = session;
+
+  const jid = toWhatsappJid(target);
+
+  await socket.presenceSubscribe(jid);
+
+  await socket.sendPresenceUpdate(presence, jid);
 };
 
 /**

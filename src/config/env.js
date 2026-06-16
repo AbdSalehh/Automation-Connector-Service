@@ -12,6 +12,10 @@ export const env = {
     : ["http://localhost:3000"],
   ablyApiKey: (process.env.ABLY_API_KEY || "").trim(),
   webhookEncryptionKey: (process.env.WEBHOOK_ENCRYPTION_KEY || "").trim(),
+  cloudinaryUrl: (process.env.CLOUDINARY_URL || "").trim(),
+  mediaMaxBytes: process.env.MEDIA_MAX_BYTES
+    ? parseInt(process.env.MEDIA_MAX_BYTES, 10)
+    : 16 * 1024 * 1024,
 };
 
 /**
@@ -40,6 +44,12 @@ export const validateEnv = (logger) => {
   if (!env.webhookEncryptionKey) {
     logger.warn(
       "WEBHOOK_ENCRYPTION_KEY belum diatur. Pesan masuk diteruskan ke AutoFlow tanpa enkripsi (format lama)",
+    );
+  }
+
+  if (!env.cloudinaryUrl) {
+    logger.warn(
+      "CLOUDINARY_URL belum diatur. Media masuk tidak akan diunggah; hanya teks/caption yang diteruskan",
     );
   }
 };
