@@ -265,6 +265,46 @@ const createIncomingMessageHandler = (sessionId) => {
 };
 
 /**
+ * Memetakan kode status pesan Baileys menjadi label yang mudah dibaca.
+ * Status 2 (server ack/centang satu) berarti pesan baru sampai server WhatsApp,
+ * sedangkan 3 (delivery ack/centang dua) berarti pesan sampai ke perangkat
+ * penerima. Bila status mentok di 2, pesan tidak benar-benar terkirim.
+ */
+const MESSAGE_STATUS_LABEL = {
+  0: "error",
+  1: "pending",
+  2: "server-ack",
+  3: "delivered",
+  4: "read",
+  5: "played",
+};
+
+/**
+ * Menangani pembaruan status pesan keluar (centang) dari WhatsApp. Berguna
+ * untuk mengetahui apakah pesan benar-benar sampai ke penerima atau hanya
+ * diterima server, karena `sendMessage` yang sukses belum menjamin pengiriman.
+ */
+const createMessageStatusHandler = (sessionId) => {
+  return (updates) => {
+    for (const { key, update } of updates) {
+      if (typeof update?.status === "undefined") {
+        continue;
+      }
+
+      logger.info(
+        {
+          sessionId,
+          messageId: key?.id,
+          remoteJid: key?.remoteJid,
+          status: MESSAGE_STATUS_LABEL[update.status] || update.status,
+        },
+        "Status pengiriman pesan diperbarui",
+      );
+    }
+  };
+};
+
+/**
  * Menangani pembaruan status koneksi untuk sebuah sesi, termasuk
  * menampilkan QR code, melakukan reconnect otomatis, dan
  * memulihkan sesi secara otomatis saat terjadi logout.
@@ -427,6 +467,7 @@ export const startSession = async (sessionId) => {
   socket.ev.on("creds.update", saveCreds);
   socket.ev.on("connection.update", createConnectionUpdateHandler(sessionId));
   socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
+  socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
 
   return socket;
 };
@@ -504,7 +545,20 @@ export const sendTextMessage = async ({ sessionId, target, message }) => {
     throw notRegisteredError;
   }
 
-  const sentMessage = await socket.sendMessage(jid, { text: message });
+  /**
+   * Kirim ke JID kanonik yang dikembalikan WhatsApp. Sejak migrasi LID,
+   * JID ini bisa berbeda dari format <nomor>@s.whatsapp.net yang dibuat manual,
+   * dan mengirim ke JID yang salah membuat pesan diterima server tapi tidak
+   * sampai ke penerima.
+   */
+  const recipientJid = registeredNumber.jid || jid;
+
+  const sentMessage = await socket.sendMessage(recipientJid, { text: message });
+
+  logger.info(
+    { sessionId, recipientJid, messageId: sentMessage?.key?.id || null },
+    "Pesan teks dikirim ke WhatsApp (menunggu ack pengiriman)",
+  );
 
   return {
     messageId: sentMessage?.key?.id || null,
