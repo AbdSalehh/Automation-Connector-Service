@@ -521,8 +521,17 @@ export const getAllSessions = () => {
 /**
  * Mengirim pesan teks dari sebuah sesi ke nomor target.
  * Nomor target divalidasi terlebih dahulu apakah terdaftar di WhatsApp.
+ * Jika `simulateTyping` bernilai true, status "composing" akan dikirimkan
+ * ke target dan pengiriman pesan akan ditunda selama `typingDelay` ms
+ * (atau durasi dinamis jika tidak ditentukan) untuk mensimulasikan ketikan manusia.
  */
-export const sendTextMessage = async ({ sessionId, target, message }) => {
+export const sendTextMessage = async ({
+  sessionId,
+  target,
+  message,
+  simulateTyping = false,
+  typingDelay,
+}) => {
   const session = sessions.get(sessionId);
 
   if (!session || session.status !== "open") {
@@ -545,13 +554,28 @@ export const sendTextMessage = async ({ sessionId, target, message }) => {
     throw notRegisteredError;
   }
 
-  /**
-   * Kirim ke JID kanonik yang dikembalikan WhatsApp. Sejak migrasi LID,
-   * JID ini bisa berbeda dari format <nomor>@s.whatsapp.net yang dibuat manual,
-   * dan mengirim ke JID yang salah membuat pesan diterima server tapi tidak
-   * sampai ke penerima.
-   */
   const recipientJid = registeredNumber.jid || jid;
+
+  // Jalankan simulasi mengetik jika diminita
+  if (simulateTyping) {
+    try {
+      await socket.presenceSubscribe(recipientJid);
+      await socket.sendPresenceUpdate("composing", recipientJid);
+
+      // Hitung delay: gunakan nilai yang diberikan atau kalkulasi dinamis (20ms/karakter, maks 3 detik)
+      const delayMs =
+        typeof typingDelay === "number" && typingDelay >= 0
+          ? typingDelay
+          : Math.min(Math.max(message.length * 20, 1000), 3000);
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    } catch (error) {
+      logger.warn(
+        { err: error?.message, sessionId, recipientJid },
+        "Gagal mengirim presence update saat simulasi mengetik (pesan tetap dikirim)",
+      );
+    }
+  }
 
   const sentMessage = await socket.sendMessage(recipientJid, { text: message });
 

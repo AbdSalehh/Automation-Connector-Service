@@ -19,7 +19,7 @@ export const handleSendMessage = async (req, res) => {
     });
   }
 
-  const { target, message } = req.body || {};
+  const { target, message, simulateTyping, typingDelay } = req.body || {};
 
   const cleanTarget = normalizePhoneNumber(target);
 
@@ -42,6 +42,8 @@ export const handleSendMessage = async (req, res) => {
       sessionId,
       target: cleanTarget,
       message,
+      simulateTyping: Boolean(simulateTyping),
+      typingDelay,
     });
 
     return sendSuccess(res, {
