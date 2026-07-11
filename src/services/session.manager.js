@@ -5,7 +5,6 @@ import {
   fetchLatestBaileysVersion,
   downloadMediaMessage,
 } from "@whiskeysockets/baileys";
-import qrcodeTerminal from "qrcode-terminal";
 import QRCode from "qrcode";
 import fs from "fs";
 import path from "path";
@@ -323,8 +322,6 @@ const createConnectionUpdateHandler = (sessionId) => {
       session.status = "qr";
 
       logger.info({ sessionId }, "QR code diterima, silakan scan");
-
-      qrcodeTerminal.generate(qr, { small: true });
 
       try {
         session.qrDataUrl = await QRCode.toDataURL(qr);
