@@ -16,6 +16,9 @@ const INBOUND_MESSAGE_EVENT = "inbound-message";
  */
 const SESSION_UPDATE_EVENT = "session-update";
 
+/** Nama event untuk perubahan chat masuk maupun keluar. */
+const CHAT_UPDATE_EVENT = "chat-update";
+
 /**
  * Klien Ably REST (publish-only). Diinisialisasi malas (lazy) saat pertama
  * kali dibutuhkan agar service tetap berjalan walau ABLY_API_KEY belum diatur.
@@ -73,6 +76,29 @@ export const publishInboundMessage = async (sessionId, payload) => {
     logger.error(
       { err: error?.message, sessionId },
       "Gagal mempublikasikan balasan masuk ke Ably",
+    );
+  }
+};
+
+/**
+ * Mempublikasikan pesan yang sudah dinormalisasi setelah masuk ke cache chat.
+ * History sync tidak memakai event ini agar initial sync tidak membanjiri Ably.
+ */
+export const publishChatUpdate = async (sessionId, payload) => {
+  const client = getAblyClient();
+
+  if (!client) {
+    return;
+  }
+
+  try {
+    const channel = client.channels.get(`session:${sessionId}`);
+
+    await channel.publish(CHAT_UPDATE_EVENT, payload);
+  } catch (error) {
+    logger.error(
+      { err: error?.message, sessionId },
+      "Gagal mempublikasikan perubahan chat ke Ably",
     );
   }
 };

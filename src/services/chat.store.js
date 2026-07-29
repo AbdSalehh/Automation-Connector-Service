@@ -21,16 +21,8 @@ const cleanupSession = (sessionId) => {
     return;
   }
 
-  for (const [jid, conversation] of conversations.entries()) {
+  for (const conversation of conversations.values()) {
     conversation.messages = removeExpiredMessages(conversation.messages);
-
-    if (conversation.messages.length === 0) {
-      conversations.delete(jid);
-    }
-  }
-
-  if (conversations.size === 0) {
-    sessionStores.delete(sessionId);
   }
 };
 
@@ -63,6 +55,7 @@ export const addChatMessage = (sessionId, jid, message) => {
     jid,
     name: "",
     updatedAt: 0,
+    lastMessage: null,
     messages: [],
   };
 
@@ -70,9 +63,17 @@ export const addChatMessage = (sessionId, jid, message) => {
     return;
   }
 
+  const normalizedMessage = { ...message, jid };
+  const messageTimestamp = getTimestamp(message);
+
   existingConversation.name = message.name || existingConversation.name;
-  existingConversation.updatedAt = getTimestamp(message);
-  existingConversation.messages.push({ ...message, jid });
+
+  if (messageTimestamp >= existingConversation.updatedAt) {
+    existingConversation.updatedAt = messageTimestamp;
+    existingConversation.lastMessage = normalizedMessage;
+  }
+
+  existingConversation.messages.push(normalizedMessage);
   existingConversation.messages.sort(
     (firstMessage, secondMessage) =>
       getTimestamp(firstMessage) - getTimestamp(secondMessage),
@@ -102,7 +103,7 @@ export const listConversations = (sessionId, { limit, offset }) => {
     .map((conversation) => ({
       jid: conversation.jid,
       name: conversation.name,
-      lastMessage: conversation.messages.at(-1) || null,
+      lastMessage: conversation.lastMessage,
     }));
 
   return {

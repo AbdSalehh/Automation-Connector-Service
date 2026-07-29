@@ -18,6 +18,7 @@ import {
 } from "../lib/phoneNumber.js";
 import { forwardInboundMessage } from "./webhook.service.js";
 import {
+  publishChatUpdate,
   publishInboundMessage,
   publishSessionUpdate,
 } from "./realtime.service.js";
@@ -253,8 +254,9 @@ const createIncomingMessageHandler = (sessionId) => {
         receivedAt: new Date().toISOString(),
       };
 
-      addChatMessage(sessionId, remoteJid, {
+      const chatMessage = {
         id: incomingMessage.key.id,
+        jid: remoteJid,
         sender,
         message: messageText,
         name: senderName,
@@ -263,7 +265,9 @@ const createIncomingMessageHandler = (sessionId) => {
         fromMe: false,
         sentAt: inboundPayload.sentAt,
         receivedAt: inboundPayload.receivedAt,
-      });
+      };
+
+      addChatMessage(sessionId, remoteJid, chatMessage);
 
       /**
        * Teruskan ke webhook engine (menggerakkan workflow) dan publikasikan ke
@@ -271,7 +275,10 @@ const createIncomingMessageHandler = (sessionId) => {
        */
       await forwardInboundMessage(inboundPayload);
 
-      await publishInboundMessage(sessionId, inboundPayload);
+      await Promise.all([
+        publishInboundMessage(sessionId, inboundPayload),
+        publishChatUpdate(sessionId, chatMessage),
+      ]);
     }
   };
 };
@@ -388,11 +395,22 @@ const createConnectionUpdateHandler = (sessionId) => {
     }
 
     if (connection === "open") {
-      session.status = "open";
-      session.qrDataUrl = null;
-      session.phoneNumber = extractNumberFromJid(
+      const previousPhoneNumber = session.phoneNumber;
+      const connectedPhoneNumber = extractNumberFromJid(
         session.socket?.user?.id || "",
       );
+
+      if (
+        previousPhoneNumber &&
+        connectedPhoneNumber &&
+        previousPhoneNumber !== connectedPhoneNumber
+      ) {
+        clearSessionChatCache(sessionId);
+      }
+
+      session.status = "open";
+      session.qrDataUrl = null;
+      session.phoneNumber = connectedPhoneNumber;
       session.name =
         session.socket?.user?.name || session.socket?.user?.notify || "";
       session.connectedAt = new Date().toISOString();
@@ -429,6 +447,10 @@ const createConnectionUpdateHandler = (sessionId) => {
           "Perangkat ter-logout. Menghapus folder sesi dan memulai ulang...",
         );
 
+        clearSessionChatCache(sessionId);
+        session.phoneNumber = null;
+        session.name = null;
+        session.connectedAt = null;
         removeSessionAuthFolder(sessionId);
 
         setTimeout(() => startSession(sessionId), 2000);
@@ -632,8 +654,9 @@ export const sendTextMessage = async ({
   const sentMessage = await socket.sendMessage(recipientJid, { text: message });
   const sentAt = convertUnixToIso(sentMessage?.messageTimestamp);
 
-  addChatMessage(sessionId, recipientJid, {
+  const chatMessage = {
     id: sentMessage?.key?.id,
+    jid: recipientJid,
     sender: session.phoneNumber,
     message,
     name: "",
@@ -642,7 +665,10 @@ export const sendTextMessage = async ({
     fromMe: true,
     sentAt,
     receivedAt: new Date().toISOString(),
-  });
+  };
+
+  addChatMessage(sessionId, recipientJid, chatMessage);
+  await publishChatUpdate(sessionId, chatMessage);
 
   logger.info(
     { sessionId, recipientJid, messageId: sentMessage?.key?.id || null },
