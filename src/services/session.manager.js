@@ -1,5 +1,4 @@
 import {
-  Browsers,
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
@@ -686,7 +685,6 @@ export const startSession = async (sessionId) => {
       version,
       auth: state,
       logger,
-      browser: Browsers.macOS("Desktop"),
       printQRInTerminal: false,
       syncFullHistory: true,
       shouldSyncHistoryMessage: () => true,
