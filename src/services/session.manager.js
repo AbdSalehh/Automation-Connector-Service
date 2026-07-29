@@ -40,6 +40,79 @@ import {
 const sessions = new Map();
 
 /**
+ * Menyimpan timer reconnect yang tertunda per session sehingga hanya ada
+ * satu percobaan reconnect pada satu waktu.
+ */
+const reconnectTimers = new Map();
+
+/**
+ * Menyimpan jumlah percobaan reconnect berturut-turut per session untuk
+ * menghitung backoff. Direset saat koneksi berhasil terbuka.
+ */
+const reconnectAttempts = new Map();
+
+/**
+ * Menandai session yang sedang dalam proses `startSession` agar pemanggilan
+ * paralel tidak membuat beberapa socket sekaligus.
+ */
+const startingSessions = new Set();
+
+const RECONNECT_BASE_DELAY_MS = 3000;
+const RECONNECT_MAX_DELAY_MS = 60000;
+
+/**
+ * Membersihkan timer dan penghitung reconnect milik sebuah session.
+ */
+const clearReconnectState = (sessionId) => {
+  const timer = reconnectTimers.get(sessionId);
+
+  if (timer) {
+    clearTimeout(timer);
+    reconnectTimers.delete(sessionId);
+  }
+
+  reconnectAttempts.delete(sessionId);
+};
+
+/**
+ * Menjadwalkan satu reconnect dengan backoff bertahap. Bila sudah ada timer
+ * yang menunggu, penjadwalan baru diabaikan agar tidak menumpuk koneksi.
+ */
+const scheduleReconnect = (sessionId) => {
+  if (reconnectTimers.has(sessionId)) {
+    return;
+  }
+
+  const attempt = (reconnectAttempts.get(sessionId) || 0) + 1;
+  reconnectAttempts.set(sessionId, attempt);
+
+  const delayMs = Math.min(
+    RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
+    RECONNECT_MAX_DELAY_MS,
+  );
+
+  logger.info(
+    { sessionId, attempt, delayMs },
+    "Menjadwalkan reconnect WhatsApp",
+  );
+
+  const timer = setTimeout(() => {
+    reconnectTimers.delete(sessionId);
+
+    startSession(sessionId).catch((error) => {
+      logger.error(
+        { err: error?.message, sessionId },
+        "Gagal reconnect WhatsApp",
+      );
+
+      scheduleReconnect(sessionId);
+    });
+  }, delayMs);
+
+  reconnectTimers.set(sessionId, timer);
+};
+
+/**
  * Mengembalikan path folder penyimpanan auth untuk sebuah sesi.
  * Setiap sesi memiliki subfolder tersendiri di dalam folder dasar.
  */
@@ -439,13 +512,22 @@ const createMessageStatusHandler = (sessionId) => {
  * menampilkan QR code, melakukan reconnect otomatis, dan
  * memulihkan sesi secara otomatis saat terjadi logout.
  */
-const createConnectionUpdateHandler = (sessionId) => {
+const createConnectionUpdateHandler = (sessionId, ownerSocket) => {
   return async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     const session = sessions.get(sessionId);
 
     if (!session) {
+      return;
+    }
+
+    /**
+     * Abaikan event dari socket lama. Saat reconnect, socket lama dapat
+     * mengirim event `close` setelah socket baru dibuat; tanpa penjaga ini
+     * event tersebut akan memicu reconnect berulang tanpa henti.
+     */
+    if (session.socket !== ownerSocket) {
       return;
     }
 
@@ -480,6 +562,8 @@ const createConnectionUpdateHandler = (sessionId) => {
         await clearSessionChatCache(sessionId);
       }
 
+      clearReconnectState(sessionId);
+
       session.status = "open";
       session.qrDataUrl = null;
       session.phoneNumber = connectedPhoneNumber;
@@ -512,12 +596,14 @@ const createConnectionUpdateHandler = (sessionId) => {
       await publishSessionUpdate(sessionId, getSessionStatus(sessionId));
 
       if (shouldReconnect) {
-        startSession(sessionId);
+        scheduleReconnect(sessionId);
       } else {
         logger.error(
           { sessionId },
           "Perangkat ter-logout. Menghapus folder sesi dan memulai ulang...",
         );
+
+        clearReconnectState(sessionId);
 
         await clearSessionChatCache(sessionId);
         session.phoneNumber = null;
@@ -525,7 +611,7 @@ const createConnectionUpdateHandler = (sessionId) => {
         session.connectedAt = null;
         removeSessionAuthFolder(sessionId);
 
-        setTimeout(() => startSession(sessionId), 2000);
+        scheduleReconnect(sessionId);
       }
     }
   };
@@ -583,40 +669,56 @@ const logoutDuplicateSessions = async (currentSessionId, phoneNumber) => {
  * kontainer tidak memaksa logout.
  */
 export const startSession = async (sessionId) => {
-  const authFolder = getSessionAuthFolder(sessionId);
+  if (startingSessions.has(sessionId)) {
+    return sessions.get(sessionId)?.socket || null;
+  }
 
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+  startingSessions.add(sessionId);
 
-  const { version } = await fetchLatestBaileysVersion();
+  try {
+    const authFolder = getSessionAuthFolder(sessionId);
 
-  const socket = makeWASocket({
-    version,
-    auth: state,
-    logger,
-    browser: Browsers.macOS("Desktop"),
-    printQRInTerminal: false,
-    syncFullHistory: true,
-    shouldSyncHistoryMessage: () => true,
-  });
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
-  const existingSession = sessions.get(sessionId);
+    const { version } = await fetchLatestBaileysVersion();
 
-  sessions.set(sessionId, {
-    socket,
-    status: existingSession?.status || "connecting",
-    qrDataUrl: existingSession?.qrDataUrl || null,
-    phoneNumber: existingSession?.phoneNumber || null,
-    name: existingSession?.name || null,
-    connectedAt: existingSession?.connectedAt || null,
-  });
+    const socket = makeWASocket({
+      version,
+      auth: state,
+      logger,
+      browser: Browsers.macOS("Desktop"),
+      printQRInTerminal: false,
+      syncFullHistory: true,
+      shouldSyncHistoryMessage: () => true,
+    });
 
-  socket.ev.on("creds.update", saveCreds);
-  socket.ev.on("connection.update", createConnectionUpdateHandler(sessionId));
-  socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
-  socket.ev.on("messaging-history.set", createHistoryMessageHandler(sessionId));
-  socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
+    const existingSession = sessions.get(sessionId);
 
-  return socket;
+    sessions.set(sessionId, {
+      socket,
+      status: existingSession?.status || "connecting",
+      qrDataUrl: existingSession?.qrDataUrl || null,
+      phoneNumber: existingSession?.phoneNumber || null,
+      name: existingSession?.name || null,
+      connectedAt: existingSession?.connectedAt || null,
+    });
+
+    socket.ev.on("creds.update", saveCreds);
+    socket.ev.on(
+      "connection.update",
+      createConnectionUpdateHandler(sessionId, socket),
+    );
+    socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
+    socket.ev.on(
+      "messaging-history.set",
+      createHistoryMessageHandler(sessionId),
+    );
+    socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
+
+    return socket;
+  } finally {
+    startingSessions.delete(sessionId);
+  }
 };
 
 /**
@@ -789,6 +891,7 @@ export const deleteSession = async (sessionId) => {
    * proses logout tidak memicu reconnect atau restart otomatis.
    */
   sessions.delete(sessionId);
+  clearReconnectState(sessionId);
   await clearSessionChatCache(sessionId);
 
   if (session?.socket) {
