@@ -40,14 +40,6 @@ const serializeMessage = (message) => ({
 });
 
 const enforceSessionLimits = async (sessionId) => {
-  const expiredBefore = new Date(
-    Date.now() - env.chatCacheTtlHours * 60 * 60 * 1000,
-  );
-
-  await prisma.whatsappMessage.deleteMany({
-    where: { sessionId, sentAt: { lt: expiredBefore } },
-  });
-
   const overflowConversations = await prisma.whatsappConversation.findMany({
     where: { sessionId },
     orderBy: { lastSentAt: "desc" },
@@ -149,15 +141,28 @@ export const addChatMessage = async (sessionId, jid, message) => {
   }
 };
 
+export const updateConversationName = async (sessionId, jid, name) => {
+  if (!sessionId || !jid || !name?.trim()) {
+    return;
+  }
+
+  await prisma.whatsappConversation.updateMany({
+    where: { sessionId, jid },
+    data: { name: name.trim() },
+  });
+};
+
 export const listConversations = async (sessionId, { limit, offset }) => {
+  const activeSince = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  const where = { sessionId, lastSentAt: { gte: activeSince } };
   const [conversations, totalItems] = await prisma.$transaction([
     prisma.whatsappConversation.findMany({
-      where: { sessionId },
+      where,
       orderBy: { lastSentAt: "desc" },
       take: limit,
       skip: offset,
     }),
-    prisma.whatsappConversation.count({ where: { sessionId } }),
+    prisma.whatsappConversation.count({ where }),
   ]);
 
   return {
@@ -169,6 +174,7 @@ export const listConversations = async (sessionId, { limit, offset }) => {
     metadata: {
       limit,
       offset,
+      activeHours: 48,
       totalItems,
       hasMore: offset + conversations.length < totalItems,
     },
@@ -178,14 +184,13 @@ export const listConversations = async (sessionId, { limit, offset }) => {
 export const listConversationMessages = async (
   sessionId,
   jid,
-  { hours, limit, offset },
+  { limit, offset },
 ) => {
-  const sentAt = { gte: new Date(Date.now() - hours * 60 * 60 * 1000) };
-  const where = { sessionId, jid, sentAt };
+  const where = { sessionId, jid };
   const [messages, totalItems] = await prisma.$transaction([
     prisma.whatsappMessage.findMany({
       where,
-      orderBy: { sentAt: "desc" },
+      orderBy: [{ sentAt: "desc" }, { id: "desc" }],
       take: limit,
       skip: offset,
     }),
@@ -197,9 +202,9 @@ export const listConversationMessages = async (
     metadata: {
       limit,
       offset,
-      hours,
       totalItems,
       hasMore: offset + messages.length < totalItems,
+      nextOffset: offset + messages.length,
     },
   };
 };

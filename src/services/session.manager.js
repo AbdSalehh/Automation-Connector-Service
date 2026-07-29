@@ -24,7 +24,11 @@ import {
 } from "./realtime.service.js";
 import { detectMessageType, extractMediaInfo } from "../lib/messageType.js";
 import { uploadInboundMedia } from "./media.service.js";
-import { addChatMessage, clearSessionChatCache } from "./chat.store.js";
+import {
+  addChatMessage,
+  clearSessionChatCache,
+  updateConversationName,
+} from "./chat.store.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -284,7 +288,28 @@ const createIncomingMessageHandler = (sessionId) => {
 };
 
 const createHistoryMessageHandler = (sessionId) => {
-  return async ({ messages }) => {
+  return async ({ chats, contacts, messages }) => {
+    const contactNames = new Map();
+
+    for (const contact of contacts || []) {
+      const contactName =
+        contact.name || contact.notify || contact.verifiedName || "";
+
+      for (const contactJid of [contact.id, contact.jid, contact.lid]) {
+        if (contactJid && contactName) {
+          contactNames.set(contactJid, contactName);
+        }
+      }
+    }
+
+    for (const chat of chats || []) {
+      const chatName = chat.name || chat.displayName || "";
+
+      if (chat.id && chatName && !contactNames.has(chat.id)) {
+        contactNames.set(chat.id, chatName);
+      }
+    }
+
     for (const historyMessage of messages) {
       const remoteJid = historyMessage.key?.remoteJid || "";
 
@@ -302,6 +327,8 @@ const createHistoryMessageHandler = (sessionId) => {
       const sender = historyMessage.key.fromMe
         ? extractNumberFromJid(remoteJid)
         : resolveSenderNumber(historyMessage.key);
+      const contactName =
+        contactNames.get(remoteJid) || historyMessage.pushName || "";
 
       if (!messageText && messageType === "text") {
         continue;
@@ -311,7 +338,7 @@ const createHistoryMessageHandler = (sessionId) => {
         id: historyMessage.key.id,
         sender,
         message: messageText,
-        name: historyMessage.pushName || "",
+        name: contactName,
         messageType,
         media: null,
         fromMe: Boolean(historyMessage.key.fromMe),
@@ -319,6 +346,12 @@ const createHistoryMessageHandler = (sessionId) => {
         receivedAt: null,
       });
     }
+
+    await Promise.all(
+      Array.from(contactNames.entries()).map(([contactJid, contactName]) =>
+        updateConversationName(sessionId, contactJid, contactName),
+      ),
+    );
   };
 };
 

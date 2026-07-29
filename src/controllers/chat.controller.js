@@ -76,11 +76,9 @@ export const handleListConversationMessages = async (request, response) => {
     });
   }
 
-  const hours = parsePositiveInteger(request.query.hours, 24, 24) || 24;
-  const limit = parsePositiveInteger(request.query.limit, 100, 200) || 100;
-  const offset = parsePositiveInteger(request.query.offset, 0, 10000);
+  const limit = parsePositiveInteger(request.query.limit, 50, 200) || 50;
+  const offset = parsePositiveInteger(request.query.offset, 0, 100000);
   const result = await listConversationMessages(sessionId, jid, {
-    hours,
     limit,
     offset,
   });
