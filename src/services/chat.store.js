@@ -173,6 +173,47 @@ export const finalizeHistoryBatch = async (sessionId, conversationJids) => {
   await enforceSessionLimits(sessionId);
 };
 
+/**
+ * Membuat atau memperbarui conversation dari daftar chat Baileys. Nama diisi
+ * bila tersedia, dan `lastSentAt` hanya dimajukan bila timestamp chat lebih
+ * baru agar urutan daftar tetap benar.
+ */
+export const seedConversation = async (
+  sessionId,
+  { jid, name, lastSentAt, lastMessage },
+) => {
+  if (!sessionId || !jid) {
+    return;
+  }
+
+  const conversationSentAt = toDate(lastSentAt);
+  const trimmedName = name?.trim() || "";
+
+  const existing = await prisma.whatsappConversation.findUnique({
+    where: { sessionId_jid: { sessionId, jid } },
+    select: { lastSentAt: true },
+  });
+
+  const shouldAdvanceTimestamp =
+    !existing || conversationSentAt > existing.lastSentAt;
+
+  await prisma.whatsappConversation.upsert({
+    where: { sessionId_jid: { sessionId, jid } },
+    create: {
+      sessionId,
+      jid,
+      name: trimmedName,
+      lastMessage: lastMessage || null,
+      lastSentAt: conversationSentAt,
+    },
+    update: {
+      ...(trimmedName ? { name: trimmedName } : {}),
+      ...(shouldAdvanceTimestamp ? { lastSentAt: conversationSentAt } : {}),
+      ...(shouldAdvanceTimestamp && lastMessage ? { lastMessage } : {}),
+    },
+  });
+};
+
 export const updateConversationName = async (sessionId, jid, name) => {
   if (!sessionId || !jid || !name?.trim()) {
     return;

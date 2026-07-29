@@ -28,6 +28,7 @@ import {
   addChatMessage,
   clearSessionChatCache,
   finalizeHistoryBatch,
+  seedConversation,
   updateConversationName,
 } from "./chat.store.js";
 
@@ -396,6 +397,41 @@ const createHistoryMessageHandler = (sessionId) => {
       if (chat.id && chatName && !contactNames.has(chat.id)) {
         contactNames.set(chat.id, chatName);
       }
+    }
+
+    /**
+     * Seed conversation dari daftar chat WhatsApp. Daftar ini mencerminkan
+     * seluruh percakapan di ponsel, sehingga tidak hanya chat yang kebetulan
+     * memiliki pesan history yang muncul di daftar.
+     */
+    for (const chat of chats || []) {
+      const chatJid = chat.id || "";
+
+      if (
+        !chatJid ||
+        chatJid.endsWith("@g.us") ||
+        chatJid === "status@broadcast"
+      ) {
+        continue;
+      }
+
+      const latestHistoryMessage = chat.messages?.[chat.messages.length - 1];
+      const latestMessageText = latestHistoryMessage?.message?.message
+        ? extractMessageText(latestHistoryMessage.message.message)
+        : "";
+
+      const lastMessage = latestMessageText
+        ? { message: latestMessageText, messageType: "text" }
+        : null;
+
+      await seedConversation(sessionId, {
+        jid: chatJid,
+        name: contactNames.get(chatJid) || "",
+        lastSentAt: convertUnixToIso(chat.conversationTimestamp),
+        lastMessage,
+      });
+
+      affectedConversationJids.add(chatJid);
     }
 
     for (const historyMessage of messages || []) {
