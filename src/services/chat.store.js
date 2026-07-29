@@ -1,6 +1,7 @@
 import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import { prisma } from "../lib/prisma.js";
+import { extractNumberFromJid } from "../lib/phoneNumber.js";
 
 const toDate = (value) => {
   const date = value ? new Date(value) : new Date();
@@ -241,7 +242,7 @@ export const listConversations = async (sessionId, { limit, offset }) => {
   return {
     data: conversations.map((conversation) => ({
       jid: conversation.jid,
-      name: conversation.name,
+      name: conversation.name?.trim() || extractNumberFromJid(conversation.jid),
       lastMessage: conversation.lastMessage,
     })),
     metadata: {

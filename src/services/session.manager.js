@@ -434,7 +434,11 @@ const createHistoryMessageHandler = (sessionId) => {
       affectedConversationJids.add(chatJid);
     }
 
-    for (const historyMessage of messages || []) {
+    /**
+     * Menyimpan satu pesan history. Sumbernya bisa dari array `messages[]`
+     * top-level maupun dari `chats[].messages` yang menempel pada tiap chat.
+     */
+    const storeHistoryMessage = async (historyMessage) => {
       const remoteJid = historyMessage.key?.remoteJid || "";
 
       if (
@@ -442,7 +446,7 @@ const createHistoryMessageHandler = (sessionId) => {
         remoteJid.endsWith("@g.us") ||
         remoteJid === "status@broadcast"
       ) {
-        continue;
+        return;
       }
 
       const messageContent = unwrapMessage(historyMessage.message);
@@ -455,7 +459,7 @@ const createHistoryMessageHandler = (sessionId) => {
         contactNames.get(remoteJid) || historyMessage.pushName || "";
 
       if (!messageText && messageType === "text") {
-        continue;
+        return;
       }
 
       const wasStored = await addChatMessage(
@@ -478,6 +482,22 @@ const createHistoryMessageHandler = (sessionId) => {
       if (wasStored) {
         affectedConversationJids.add(remoteJid);
         storedMessageCount += 1;
+      }
+    };
+
+    for (const historyMessage of messages || []) {
+      await storeHistoryMessage(historyMessage);
+    }
+
+    /**
+     * Pesan history juga menempel pada tiap chat. Simpan agar riwayat per
+     * percakapan tetap terisi walaupun array `messages[]` top-level kosong.
+     */
+    for (const chat of chats || []) {
+      for (const embeddedMessage of chat.messages || []) {
+        if (embeddedMessage?.message) {
+          await storeHistoryMessage(embeddedMessage.message);
+        }
       }
     }
 
