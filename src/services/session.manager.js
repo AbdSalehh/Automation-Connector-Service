@@ -655,12 +655,11 @@ const createConnectionUpdateHandler = (sessionId, ownerSocket) => {
       } else {
         logger.error(
           { sessionId },
-          "Perangkat ter-logout. Menghapus folder sesi dan memulai ulang...",
+          "Perangkat ter-logout. Menghapus auth tanpa menghapus cache chat...",
         );
 
         clearReconnectState(sessionId);
 
-        await clearSessionChatCache(sessionId);
         session.phoneNumber = null;
         session.name = null;
         session.connectedAt = null;
