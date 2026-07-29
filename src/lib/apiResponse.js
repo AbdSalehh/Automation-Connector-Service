@@ -5,14 +5,20 @@
 
 export const sendSuccess = (
   res,
-  { statusCode = 200, message = "Berhasil", data = null },
+  { statusCode = 200, message = "Berhasil", data = null, metadata },
 ) => {
-  return res.status(statusCode).json({
+  const responseBody = {
     success: true,
     statusCode,
     message,
     data,
-  });
+  };
+
+  if (metadata) {
+    responseBody.metadata = metadata;
+  }
+
+  return res.status(statusCode).json(responseBody);
 };
 
 export const sendError = (

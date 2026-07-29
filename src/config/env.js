@@ -16,6 +16,15 @@ export const env = {
   mediaMaxBytes: process.env.MEDIA_MAX_BYTES
     ? parseInt(process.env.MEDIA_MAX_BYTES, 10)
     : 16 * 1024 * 1024,
+  chatCacheTtlHours: process.env.CHAT_CACHE_TTL_HOURS
+    ? parseInt(process.env.CHAT_CACHE_TTL_HOURS, 10)
+    : 24,
+  chatCacheMaxConversations: process.env.CHAT_CACHE_MAX_CONVERSATIONS
+    ? parseInt(process.env.CHAT_CACHE_MAX_CONVERSATIONS, 10)
+    : 100,
+  chatCacheMaxMessages: process.env.CHAT_CACHE_MAX_MESSAGES
+    ? parseInt(process.env.CHAT_CACHE_MAX_MESSAGES, 10)
+    : 200,
 };
 
 /**

@@ -4,6 +4,7 @@ import cors from "cors";
 import { env } from "./config/env.js";
 import { messageRouter } from "./routes/message.routes.js";
 import { sessionRouter } from "./routes/session.routes.js";
+import { chatRouter } from "./routes/chat.routes.js";
 import { sendSuccess, sendError } from "./lib/apiResponse.js";
 import { getAllSessions } from "./services/session.manager.js";
 import { logger } from "./config/logger.js";
@@ -39,6 +40,7 @@ export const createApp = () => {
 
   app.use(messageRouter);
   app.use(sessionRouter);
+  app.use(chatRouter);
 
   /**
    * Handler untuk rute yang tidak ditemukan.

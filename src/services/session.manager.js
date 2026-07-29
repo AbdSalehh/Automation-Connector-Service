@@ -23,6 +23,7 @@ import {
 } from "./realtime.service.js";
 import { detectMessageType, extractMediaInfo } from "../lib/messageType.js";
 import { uploadInboundMedia } from "./media.service.js";
+import { addChatMessage, clearSessionChatCache } from "./chat.store.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -252,6 +253,18 @@ const createIncomingMessageHandler = (sessionId) => {
         receivedAt: new Date().toISOString(),
       };
 
+      addChatMessage(sessionId, remoteJid, {
+        id: incomingMessage.key.id,
+        sender,
+        message: messageText,
+        name: senderName,
+        messageType,
+        media,
+        fromMe: false,
+        sentAt: inboundPayload.sentAt,
+        receivedAt: inboundPayload.receivedAt,
+      });
+
       /**
        * Teruskan ke webhook engine (menggerakkan workflow) dan publikasikan ke
        * Ably (UI realtime) secara berdampingan. Keduanya memakai payload sama.
@@ -259,6 +272,45 @@ const createIncomingMessageHandler = (sessionId) => {
       await forwardInboundMessage(inboundPayload);
 
       await publishInboundMessage(sessionId, inboundPayload);
+    }
+  };
+};
+
+const createHistoryMessageHandler = (sessionId) => {
+  return ({ messages }) => {
+    for (const historyMessage of messages) {
+      const remoteJid = historyMessage.key?.remoteJid || "";
+
+      if (
+        !historyMessage.message ||
+        remoteJid.endsWith("@g.us") ||
+        remoteJid === "status@broadcast"
+      ) {
+        continue;
+      }
+
+      const messageContent = unwrapMessage(historyMessage.message);
+      const messageType = detectMessageType(messageContent);
+      const messageText = extractMessageText(historyMessage.message);
+      const sender = historyMessage.key.fromMe
+        ? extractNumberFromJid(remoteJid)
+        : resolveSenderNumber(historyMessage.key);
+
+      if (!messageText && messageType === "text") {
+        continue;
+      }
+
+      addChatMessage(sessionId, remoteJid, {
+        id: historyMessage.key.id,
+        sender,
+        message: messageText,
+        name: historyMessage.pushName || "",
+        messageType,
+        media: null,
+        fromMe: Boolean(historyMessage.key.fromMe),
+        sentAt: convertUnixToIso(historyMessage.messageTimestamp),
+        receivedAt: null,
+      });
     }
   };
 };
@@ -448,6 +500,8 @@ export const startSession = async (sessionId) => {
     auth: state,
     logger,
     printQRInTerminal: false,
+    syncFullHistory: true,
+    shouldSyncHistoryMessage: () => true,
   });
 
   const existingSession = sessions.get(sessionId);
@@ -464,6 +518,7 @@ export const startSession = async (sessionId) => {
   socket.ev.on("creds.update", saveCreds);
   socket.ev.on("connection.update", createConnectionUpdateHandler(sessionId));
   socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
+  socket.ev.on("messaging-history.set", createHistoryMessageHandler(sessionId));
   socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
 
   return socket;
@@ -575,6 +630,19 @@ export const sendTextMessage = async ({
   }
 
   const sentMessage = await socket.sendMessage(recipientJid, { text: message });
+  const sentAt = convertUnixToIso(sentMessage?.messageTimestamp);
+
+  addChatMessage(sessionId, recipientJid, {
+    id: sentMessage?.key?.id,
+    sender: session.phoneNumber,
+    message,
+    name: "",
+    messageType: "text",
+    media: null,
+    fromMe: true,
+    sentAt,
+    receivedAt: new Date().toISOString(),
+  });
 
   logger.info(
     { sessionId, recipientJid, messageId: sentMessage?.key?.id || null },
@@ -622,6 +690,7 @@ export const deleteSession = async (sessionId) => {
    * proses logout tidak memicu reconnect atau restart otomatis.
    */
   sessions.delete(sessionId);
+  clearSessionChatCache(sessionId);
 
   if (session?.socket) {
     try {
