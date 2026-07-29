@@ -1,4 +1,5 @@
 import {
+  Browsers,
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
@@ -27,6 +28,7 @@ import { uploadInboundMedia } from "./media.service.js";
 import {
   addChatMessage,
   clearSessionChatCache,
+  finalizeHistoryBatch,
   updateConversationName,
 } from "./chat.store.js";
 
@@ -288,8 +290,22 @@ const createIncomingMessageHandler = (sessionId) => {
 };
 
 const createHistoryMessageHandler = (sessionId) => {
-  return async ({ chats, contacts, messages }) => {
+  return async ({ chats, contacts, messages, syncType, progress }) => {
     const contactNames = new Map();
+    const affectedConversationJids = new Set();
+    let storedMessageCount = 0;
+
+    logger.info(
+      {
+        sessionId,
+        syncType,
+        progress,
+        chatCount: chats?.length || 0,
+        contactCount: contacts?.length || 0,
+        messageCount: messages?.length || 0,
+      },
+      "Menerima batch history WhatsApp",
+    );
 
     for (const contact of contacts || []) {
       const contactName =
@@ -310,7 +326,7 @@ const createHistoryMessageHandler = (sessionId) => {
       }
     }
 
-    for (const historyMessage of messages) {
+    for (const historyMessage of messages || []) {
       const remoteJid = historyMessage.key?.remoteJid || "";
 
       if (
@@ -334,23 +350,46 @@ const createHistoryMessageHandler = (sessionId) => {
         continue;
       }
 
-      await addChatMessage(sessionId, remoteJid, {
-        id: historyMessage.key.id,
-        sender,
-        message: messageText,
-        name: contactName,
-        messageType,
-        media: null,
-        fromMe: Boolean(historyMessage.key.fromMe),
-        sentAt: convertUnixToIso(historyMessage.messageTimestamp),
-        receivedAt: null,
-      });
+      const wasStored = await addChatMessage(
+        sessionId,
+        remoteJid,
+        {
+          id: historyMessage.key.id,
+          sender,
+          message: messageText,
+          name: contactName,
+          messageType,
+          media: null,
+          fromMe: Boolean(historyMessage.key.fromMe),
+          sentAt: convertUnixToIso(historyMessage.messageTimestamp),
+          receivedAt: null,
+        },
+        { deferRetention: true },
+      );
+
+      if (wasStored) {
+        affectedConversationJids.add(remoteJid);
+        storedMessageCount += 1;
+      }
     }
+
+    await finalizeHistoryBatch(sessionId, Array.from(affectedConversationJids));
 
     await Promise.all(
       Array.from(contactNames.entries()).map(([contactJid, contactName]) =>
         updateConversationName(sessionId, contactJid, contactName),
       ),
+    );
+
+    logger.info(
+      {
+        sessionId,
+        syncType,
+        progress,
+        storedMessageCount,
+        affectedConversationCount: affectedConversationJids.size,
+      },
+      "Batch history WhatsApp selesai disimpan",
     );
   };
 };
@@ -554,6 +593,7 @@ export const startSession = async (sessionId) => {
     version,
     auth: state,
     logger,
+    browser: Browsers.macOS("Desktop"),
     printQRInTerminal: false,
     syncFullHistory: true,
     shouldSyncHistoryMessage: () => true,

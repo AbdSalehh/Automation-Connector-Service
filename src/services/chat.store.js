@@ -39,10 +39,29 @@ const serializeMessage = (message) => ({
   receivedAt: message.receivedAt?.toISOString() || null,
 });
 
+const enforceConversationLimit = async (conversationId) => {
+  const overflowMessages = await prisma.whatsappMessage.findMany({
+    where: { conversationId },
+    orderBy: [{ sentAt: "desc" }, { id: "desc" }],
+    skip: env.chatCacheMaxMessages,
+    select: { id: true },
+  });
+
+  if (overflowMessages.length > 0) {
+    await prisma.whatsappMessage.deleteMany({
+      where: {
+        id: {
+          in: overflowMessages.map((storedMessage) => storedMessage.id),
+        },
+      },
+    });
+  }
+};
+
 const enforceSessionLimits = async (sessionId) => {
   const overflowConversations = await prisma.whatsappConversation.findMany({
     where: { sessionId },
-    orderBy: { lastSentAt: "desc" },
+    orderBy: [{ lastSentAt: "desc" }, { id: "desc" }],
     skip: env.chatCacheMaxConversations,
     select: { id: true },
   });
@@ -58,15 +77,20 @@ const enforceSessionLimits = async (sessionId) => {
   }
 };
 
-export const addChatMessage = async (sessionId, jid, message) => {
+export const addChatMessage = async (
+  sessionId,
+  jid,
+  message,
+  { deferRetention = false } = {},
+) => {
   if (!sessionId || !jid || !message?.id) {
-    return;
+    return false;
   }
 
   const normalizedMessage = normalizeMessage(jid, message);
 
   try {
-    await prisma.$transaction(async (transaction) => {
+    const conversationId = await prisma.$transaction(async (transaction) => {
       const conversation = await transaction.whatsappConversation.upsert({
         where: { sessionId_jid: { sessionId, jid } },
         create: {
@@ -114,31 +138,39 @@ export const addChatMessage = async (sessionId, jid, message) => {
         });
       }
 
-      const overflowMessages = await transaction.whatsappMessage.findMany({
-        where: { conversationId: conversation.id },
-        orderBy: { sentAt: "desc" },
-        skip: env.chatCacheMaxMessages,
-        select: { id: true },
-      });
-
-      if (overflowMessages.length > 0) {
-        await transaction.whatsappMessage.deleteMany({
-          where: {
-            id: {
-              in: overflowMessages.map((storedMessage) => storedMessage.id),
-            },
-          },
-        });
-      }
+      return conversation.id;
     });
 
-    await enforceSessionLimits(sessionId);
+    if (!deferRetention) {
+      await enforceConversationLimit(conversationId);
+      await enforceSessionLimits(sessionId);
+    }
+
+    return true;
   } catch (error) {
     logger.error(
       { err: error?.message, sessionId, jid },
       "Gagal menyimpan chat WhatsApp ke Supabase",
     );
+
+    return false;
   }
+};
+
+export const finalizeHistoryBatch = async (sessionId, conversationJids) => {
+  const conversations = await prisma.whatsappConversation.findMany({
+    where: {
+      sessionId,
+      jid: { in: Array.from(new Set(conversationJids)) },
+    },
+    select: { id: true },
+  });
+
+  for (const conversation of conversations) {
+    await enforceConversationLimit(conversation.id);
+  }
+
+  await enforceSessionLimits(sessionId);
 };
 
 export const updateConversationName = async (sessionId, jid, name) => {
