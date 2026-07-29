@@ -1,178 +1,221 @@
 import { env } from "../config/env.js";
+import { logger } from "../config/logger.js";
+import { prisma } from "../lib/prisma.js";
 
-const sessionStores = new Map();
-
-const getTimestamp = (message) => {
-  const timestamp = Date.parse(message.sentAt || message.receivedAt || "");
-  return Number.isFinite(timestamp) ? timestamp : Date.now();
+const toDate = (value) => {
+  const date = value ? new Date(value) : new Date();
+  return Number.isNaN(date.getTime()) ? new Date() : date;
 };
 
-const removeExpiredMessages = (messages) => {
-  const minimumTimestamp = Date.now() - env.chatCacheTtlHours * 60 * 60 * 1000;
-  return messages.filter(
-    (message) => getTimestamp(message) >= minimumTimestamp,
+const normalizeMessage = (jid, message) => ({
+  id: message.id,
+  jid,
+  sender: message.sender || null,
+  message: message.message || "",
+  name: message.name || "",
+  messageType: message.messageType || "text",
+  media: message.media || null,
+  fromMe: Boolean(message.fromMe),
+  sentAt: toDate(message.sentAt || message.receivedAt),
+  receivedAt: message.receivedAt ? toDate(message.receivedAt) : null,
+});
+
+const toLastMessage = (message) => ({
+  ...message,
+  sentAt: message.sentAt.toISOString(),
+  receivedAt: message.receivedAt?.toISOString() || null,
+});
+
+const serializeMessage = (message) => ({
+  id: message.whatsappId,
+  jid: message.jid,
+  sender: message.sender,
+  message: message.message,
+  name: message.name,
+  messageType: message.messageType,
+  media: message.media,
+  fromMe: message.fromMe,
+  sentAt: message.sentAt.toISOString(),
+  receivedAt: message.receivedAt?.toISOString() || null,
+});
+
+const enforceSessionLimits = async (sessionId) => {
+  const expiredBefore = new Date(
+    Date.now() - env.chatCacheTtlHours * 60 * 60 * 1000,
   );
-};
 
-const cleanupSession = (sessionId) => {
-  const conversations = sessionStores.get(sessionId);
+  await prisma.whatsappMessage.deleteMany({
+    where: { sessionId, sentAt: { lt: expiredBefore } },
+  });
 
-  if (!conversations) {
-    return;
-  }
+  const overflowConversations = await prisma.whatsappConversation.findMany({
+    where: { sessionId },
+    orderBy: { lastSentAt: "desc" },
+    skip: env.chatCacheMaxConversations,
+    select: { id: true },
+  });
 
-  for (const conversation of conversations.values()) {
-    conversation.messages = removeExpiredMessages(conversation.messages);
-  }
-};
-
-const enforceConversationLimit = (conversations) => {
-  if (conversations.size <= env.chatCacheMaxConversations) {
-    return;
-  }
-
-  const oldestConversations = [...conversations.entries()].sort(
-    ([, firstConversation], [, secondConversation]) =>
-      firstConversation.updatedAt - secondConversation.updatedAt,
-  );
-
-  const deleteCount = conversations.size - env.chatCacheMaxConversations;
-
-  for (const [jid] of oldestConversations.slice(0, deleteCount)) {
-    conversations.delete(jid);
+  if (overflowConversations.length > 0) {
+    await prisma.whatsappConversation.deleteMany({
+      where: {
+        id: {
+          in: overflowConversations.map((conversation) => conversation.id),
+        },
+      },
+    });
   }
 };
 
-export const addChatMessage = (sessionId, jid, message) => {
+export const addChatMessage = async (sessionId, jid, message) => {
   if (!sessionId || !jid || !message?.id) {
     return;
   }
 
-  cleanupSession(sessionId);
+  const normalizedMessage = normalizeMessage(jid, message);
 
-  const conversations = sessionStores.get(sessionId) || new Map();
-  const existingConversation = conversations.get(jid) || {
-    jid,
-    name: "",
-    updatedAt: 0,
-    lastMessage: null,
-    messages: [],
-  };
+  try {
+    await prisma.$transaction(async (transaction) => {
+      const conversation = await transaction.whatsappConversation.upsert({
+        where: { sessionId_jid: { sessionId, jid } },
+        create: {
+          sessionId,
+          jid,
+          name: normalizedMessage.name,
+          lastMessage: toLastMessage(normalizedMessage),
+          lastSentAt: normalizedMessage.sentAt,
+        },
+        update: normalizedMessage.name ? { name: normalizedMessage.name } : {},
+      });
 
-  if (existingConversation.messages.some((item) => item.id === message.id)) {
-    return;
+      await transaction.whatsappMessage.upsert({
+        where: {
+          sessionId_whatsappId: {
+            sessionId,
+            whatsappId: normalizedMessage.id,
+          },
+        },
+        create: {
+          whatsappId: normalizedMessage.id,
+          conversationId: conversation.id,
+          sessionId,
+          jid,
+          sender: normalizedMessage.sender,
+          message: normalizedMessage.message,
+          name: normalizedMessage.name,
+          messageType: normalizedMessage.messageType,
+          media: normalizedMessage.media,
+          fromMe: normalizedMessage.fromMe,
+          sentAt: normalizedMessage.sentAt,
+          receivedAt: normalizedMessage.receivedAt,
+        },
+        update: {},
+      });
+
+      if (normalizedMessage.sentAt >= conversation.lastSentAt) {
+        await transaction.whatsappConversation.update({
+          where: { id: conversation.id },
+          data: {
+            name: normalizedMessage.name || conversation.name,
+            lastMessage: toLastMessage(normalizedMessage),
+            lastSentAt: normalizedMessage.sentAt,
+          },
+        });
+      }
+
+      const overflowMessages = await transaction.whatsappMessage.findMany({
+        where: { conversationId: conversation.id },
+        orderBy: { sentAt: "desc" },
+        skip: env.chatCacheMaxMessages,
+        select: { id: true },
+      });
+
+      if (overflowMessages.length > 0) {
+        await transaction.whatsappMessage.deleteMany({
+          where: {
+            id: {
+              in: overflowMessages.map((storedMessage) => storedMessage.id),
+            },
+          },
+        });
+      }
+    });
+
+    await enforceSessionLimits(sessionId);
+  } catch (error) {
+    logger.error(
+      { err: error?.message, sessionId, jid },
+      "Gagal menyimpan chat WhatsApp ke Supabase",
+    );
   }
-
-  const normalizedMessage = { ...message, jid };
-  const messageTimestamp = getTimestamp(message);
-
-  existingConversation.name = message.name || existingConversation.name;
-
-  if (messageTimestamp >= existingConversation.updatedAt) {
-    existingConversation.updatedAt = messageTimestamp;
-    existingConversation.lastMessage = normalizedMessage;
-  }
-
-  existingConversation.messages.push(normalizedMessage);
-  existingConversation.messages.sort(
-    (firstMessage, secondMessage) =>
-      getTimestamp(firstMessage) - getTimestamp(secondMessage),
-  );
-  existingConversation.messages = existingConversation.messages.slice(
-    -env.chatCacheMaxMessages,
-  );
-
-  conversations.set(jid, existingConversation);
-  enforceConversationLimit(conversations);
-  sessionStores.set(sessionId, conversations);
 };
 
-export const listConversations = (sessionId, { limit, offset }) => {
-  cleanupSession(sessionId);
+export const listConversations = async (sessionId, { limit, offset }) => {
+  const [conversations, totalItems] = await prisma.$transaction([
+    prisma.whatsappConversation.findMany({
+      where: { sessionId },
+      orderBy: { lastSentAt: "desc" },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.whatsappConversation.count({ where: { sessionId } }),
+  ]);
 
-  const conversations = sessionStores.get(sessionId);
-  const sortedConversations = conversations
-    ? [...conversations.values()].sort(
-        (firstConversation, secondConversation) =>
-          secondConversation.updatedAt - firstConversation.updatedAt,
-      )
-    : [];
-
-  const data = sortedConversations
-    .slice(offset, offset + limit)
-    .map((conversation) => ({
+  return {
+    data: conversations.map((conversation) => ({
       jid: conversation.jid,
       name: conversation.name,
       lastMessage: conversation.lastMessage,
-    }));
-
-  return {
-    data,
+    })),
     metadata: {
       limit,
       offset,
-      totalItems: sortedConversations.length,
-      hasMore: offset + data.length < sortedConversations.length,
+      totalItems,
+      hasMore: offset + conversations.length < totalItems,
     },
   };
 };
 
-export const listConversationMessages = (
+export const listConversationMessages = async (
   sessionId,
   jid,
   { hours, limit, offset },
 ) => {
-  cleanupSession(sessionId);
-
-  const conversation = sessionStores.get(sessionId)?.get(jid);
-  const minimumTimestamp = Date.now() - hours * 60 * 60 * 1000;
-  const messages = conversation
-    ? conversation.messages.filter(
-        (message) => getTimestamp(message) >= minimumTimestamp,
-      )
-    : [];
-  const descendingMessages = [...messages].reverse();
-  const data = descendingMessages.slice(offset, offset + limit);
+  const sentAt = { gte: new Date(Date.now() - hours * 60 * 60 * 1000) };
+  const where = { sessionId, jid, sentAt };
+  const [messages, totalItems] = await prisma.$transaction([
+    prisma.whatsappMessage.findMany({
+      where,
+      orderBy: { sentAt: "desc" },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.whatsappMessage.count({ where }),
+  ]);
 
   return {
-    data,
+    data: messages.map(serializeMessage),
     metadata: {
       limit,
       offset,
       hours,
-      totalItems: descendingMessages.length,
-      hasMore: offset + data.length < descendingMessages.length,
+      totalItems,
+      hasMore: offset + messages.length < totalItems,
     },
   };
 };
 
-export const clearConversationCache = (sessionId, jid) => {
-  const conversations = sessionStores.get(sessionId);
+export const clearConversationCache = async (sessionId, jid) => {
+  const result = await prisma.whatsappConversation.deleteMany({
+    where: { sessionId, jid },
+  });
 
-  if (!conversations) {
-    return false;
-  }
-
-  const wasDeleted = conversations.delete(jid);
-
-  if (conversations.size === 0) {
-    sessionStores.delete(sessionId);
-  }
-
-  return wasDeleted;
+  return result.count > 0;
 };
 
-export const clearSessionChatCache = (sessionId) => {
-  return sessionStores.delete(sessionId);
+export const clearSessionChatCache = async (sessionId) => {
+  const result = await prisma.whatsappConversation.deleteMany({
+    where: { sessionId },
+  });
+
+  return result.count > 0;
 };
-
-const cleanupInterval = setInterval(
-  () => {
-    for (const sessionId of sessionStores.keys()) {
-      cleanupSession(sessionId);
-    }
-  },
-  15 * 60 * 1000,
-);
-
-cleanupInterval.unref();

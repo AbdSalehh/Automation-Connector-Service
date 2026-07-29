@@ -41,7 +41,7 @@ const validateSession = (request, response) => {
   return sessionId;
 };
 
-export const handleListConversations = (request, response) => {
+export const handleListConversations = async (request, response) => {
   const sessionId = validateSession(request, response);
 
   if (!sessionId) {
@@ -50,7 +50,7 @@ export const handleListConversations = (request, response) => {
 
   const limit = parsePositiveInteger(request.query.limit, 15, 50) || 15;
   const offset = parsePositiveInteger(request.query.offset, 0, 10000);
-  const result = listConversations(sessionId, { limit, offset });
+  const result = await listConversations(sessionId, { limit, offset });
 
   return sendSuccess(response, {
     statusCode: 200,
@@ -60,7 +60,7 @@ export const handleListConversations = (request, response) => {
   });
 };
 
-export const handleListConversationMessages = (request, response) => {
+export const handleListConversationMessages = async (request, response) => {
   const sessionId = validateSession(request, response);
 
   if (!sessionId) {
@@ -79,7 +79,7 @@ export const handleListConversationMessages = (request, response) => {
   const hours = parsePositiveInteger(request.query.hours, 24, 24) || 24;
   const limit = parsePositiveInteger(request.query.limit, 100, 200) || 100;
   const offset = parsePositiveInteger(request.query.offset, 0, 10000);
-  const result = listConversationMessages(sessionId, jid, {
+  const result = await listConversationMessages(sessionId, jid, {
     hours,
     limit,
     offset,
@@ -93,7 +93,7 @@ export const handleListConversationMessages = (request, response) => {
   });
 };
 
-export const handleClearConversationCache = (request, response) => {
+export const handleClearConversationCache = async (request, response) => {
   const sessionId = validateSession(request, response);
 
   if (!sessionId) {
@@ -101,7 +101,7 @@ export const handleClearConversationCache = (request, response) => {
   }
 
   const jid = decodeURIComponent(request.params.jid || "").trim();
-  const wasDeleted = clearConversationCache(sessionId, jid);
+  const wasDeleted = await clearConversationCache(sessionId, jid);
 
   return sendSuccess(response, {
     statusCode: 200,

@@ -13,6 +13,8 @@ export const env = {
   ablyApiKey: (process.env.ABLY_API_KEY || "").trim(),
   webhookEncryptionKey: (process.env.WEBHOOK_ENCRYPTION_KEY || "").trim(),
   cloudinaryUrl: (process.env.CLOUDINARY_URL || "").trim(),
+  databaseUrl: (process.env.DATABASE_URL || "").trim(),
+  directUrl: (process.env.DIRECT_URL || "").trim(),
   mediaMaxBytes: process.env.MEDIA_MAX_BYTES
     ? parseInt(process.env.MEDIA_MAX_BYTES, 10)
     : 16 * 1024 * 1024,
@@ -59,6 +61,12 @@ export const validateEnv = (logger) => {
   if (!env.cloudinaryUrl) {
     logger.warn(
       "CLOUDINARY_URL belum diatur. Media masuk tidak akan diunggah; hanya teks/caption yang diteruskan",
+    );
+  }
+
+  if (!env.databaseUrl || !env.directUrl) {
+    logger.warn(
+      "DATABASE_URL atau DIRECT_URL belum diatur. Chat history Supabase tidak dapat digunakan",
     );
   }
 };

@@ -267,7 +267,7 @@ const createIncomingMessageHandler = (sessionId) => {
         receivedAt: inboundPayload.receivedAt,
       };
 
-      addChatMessage(sessionId, remoteJid, chatMessage);
+      await addChatMessage(sessionId, remoteJid, chatMessage);
 
       /**
        * Teruskan ke webhook engine (menggerakkan workflow) dan publikasikan ke
@@ -284,7 +284,7 @@ const createIncomingMessageHandler = (sessionId) => {
 };
 
 const createHistoryMessageHandler = (sessionId) => {
-  return ({ messages }) => {
+  return async ({ messages }) => {
     for (const historyMessage of messages) {
       const remoteJid = historyMessage.key?.remoteJid || "";
 
@@ -307,7 +307,7 @@ const createHistoryMessageHandler = (sessionId) => {
         continue;
       }
 
-      addChatMessage(sessionId, remoteJid, {
+      await addChatMessage(sessionId, remoteJid, {
         id: historyMessage.key.id,
         sender,
         message: messageText,
@@ -405,7 +405,7 @@ const createConnectionUpdateHandler = (sessionId) => {
         connectedPhoneNumber &&
         previousPhoneNumber !== connectedPhoneNumber
       ) {
-        clearSessionChatCache(sessionId);
+        await clearSessionChatCache(sessionId);
       }
 
       session.status = "open";
@@ -447,7 +447,7 @@ const createConnectionUpdateHandler = (sessionId) => {
           "Perangkat ter-logout. Menghapus folder sesi dan memulai ulang...",
         );
 
-        clearSessionChatCache(sessionId);
+        await clearSessionChatCache(sessionId);
         session.phoneNumber = null;
         session.name = null;
         session.connectedAt = null;
@@ -667,7 +667,7 @@ export const sendTextMessage = async ({
     receivedAt: new Date().toISOString(),
   };
 
-  addChatMessage(sessionId, recipientJid, chatMessage);
+  await addChatMessage(sessionId, recipientJid, chatMessage);
   await publishChatUpdate(sessionId, chatMessage);
 
   logger.info(
@@ -716,7 +716,7 @@ export const deleteSession = async (sessionId) => {
    * proses logout tidak memicu reconnect atau restart otomatis.
    */
   sessions.delete(sessionId);
-  clearSessionChatCache(sessionId);
+  await clearSessionChatCache(sessionId);
 
   if (session?.socket) {
     try {
