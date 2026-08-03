@@ -276,7 +276,7 @@ const createIncomingMessageHandler = (sessionId) => {
     }
 
     for (const incomingMessage of messages) {
-      if (incomingMessage.key.fromMe || !incomingMessage.message) {
+      if (!incomingMessage.message) {
         continue;
       }
 
@@ -286,7 +286,16 @@ const createIncomingMessageHandler = (sessionId) => {
         continue;
       }
 
-      const sender = resolveSenderNumber(incomingMessage.key);
+      const isFromMe = Boolean(incomingMessage.key.fromMe);
+
+      /**
+       * Pesan fromMe (dikirim dari HP, bukan dari API ini) tidak punya
+       * `senderPn`/`participantPn`; nomor lawan bicara diambil dari
+       * `remoteJid` itu sendiri.
+       */
+      const sender = isFromMe
+        ? extractNumberFromJid(remoteJid)
+        : resolveSenderNumber(incomingMessage.key);
       const messageText = extractMessageText(incomingMessage.message);
       const senderName = incomingMessage.pushName || "";
 
@@ -299,18 +308,22 @@ const createIncomingMessageHandler = (sessionId) => {
         continue;
       }
 
+      /**
+       * Nomor pengirim bisa tidak teresolusi bila remoteJid berupa `@lid`
+       * dan kontaknya belum tersinkron dengan `senderPn`. Pesan tetap
+       * disimpan ke cache (percakapan tetap muncul), hanya webhook yang
+       * dilewati karena butuh nomor tujuan balasan yang valid.
+       */
       if (!sender) {
         logger.warn(
           { sessionId, remoteJid },
-          "Nomor pengirim tidak dapat diresolusi dari LID, balasan dilewati",
+          "Nomor pengirim tidak dapat diresolusi dari LID, webhook dilewati",
         );
-
-        continue;
       }
 
       logger.info(
-        { sessionId, sender, messageType },
-        "Pesan masuk diterima dari WhatsApp",
+        { sessionId, sender, messageType, isFromMe },
+        "Pesan WhatsApp diterima",
       );
 
       const media = isMedia
@@ -322,17 +335,6 @@ const createIncomingMessageHandler = (sessionId) => {
           )
         : null;
 
-      const inboundPayload = {
-        sessionId,
-        sender,
-        message: messageText,
-        name: senderName,
-        messageType,
-        media,
-        sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
-        receivedAt: new Date().toISOString(),
-      };
-
       const chatMessage = {
         id: incomingMessage.key.id,
         jid: remoteJid,
@@ -341,23 +343,35 @@ const createIncomingMessageHandler = (sessionId) => {
         name: senderName,
         messageType,
         media,
-        fromMe: false,
-        sentAt: inboundPayload.sentAt,
-        receivedAt: inboundPayload.receivedAt,
+        fromMe: isFromMe,
+        sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
+        receivedAt: new Date().toISOString(),
       };
 
       await addChatMessage(sessionId, remoteJid, chatMessage);
 
-      /**
-       * Teruskan ke webhook engine (menggerakkan workflow) dan publikasikan ke
-       * Ably (UI realtime) secara berdampingan. Keduanya memakai payload sama.
-       */
-      await forwardInboundMessage(inboundPayload);
+      await publishChatUpdate(sessionId, chatMessage);
 
-      await Promise.all([
-        publishInboundMessage(sessionId, inboundPayload),
-        publishChatUpdate(sessionId, chatMessage),
-      ]);
+      /**
+       * Webhook engine (menggerakkan workflow) hanya dipicu untuk pesan
+       * masuk yang bukan fromMe dan punya sender valid, agar tidak
+       * memicu balasan otomatis atas pesan yang kita kirim sendiri.
+       */
+      if (!isFromMe && sender) {
+        const inboundPayload = {
+          sessionId,
+          sender,
+          message: messageText,
+          name: senderName,
+          messageType,
+          media,
+          sentAt: chatMessage.sentAt,
+          receivedAt: chatMessage.receivedAt,
+        };
+
+        await forwardInboundMessage(inboundPayload);
+        await publishInboundMessage(sessionId, inboundPayload);
+      }
     }
   };
 };
