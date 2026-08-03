@@ -8,6 +8,19 @@ const toDate = (value) => {
   return Number.isNaN(date.getTime()) ? new Date() : date;
 };
 
+/**
+ * Fallback nama tampilan saat conversation tidak punya nama tersimpan.
+ * JID `@lid` adalah identitas internal WhatsApp, bukan nomor telepon,
+ * sehingga tidak boleh ditampilkan sebagai digit nomor.
+ */
+const resolveDisplayName = (jid) => {
+  if (jid.endsWith("@lid")) {
+    return "Kontak WhatsApp";
+  }
+
+  return extractNumberFromJid(jid);
+};
+
 const normalizeMessage = (jid, message) => ({
   id: message.id,
   jid,
@@ -227,8 +240,11 @@ export const updateConversationName = async (sessionId, jid, name) => {
 };
 
 export const listConversations = async (sessionId, { limit, offset }) => {
-  const activeSince = new Date(Date.now() - 48 * 60 * 60 * 1000);
-  const where = { sessionId, lastSentAt: { gte: activeSince } };
+  const activeSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const where = {
+    sessionId,
+    lastSentAt: { gte: activeSince },
+  };
   const [conversations, totalItems] = await prisma.$transaction([
     prisma.whatsappConversation.findMany({
       where,
@@ -242,13 +258,13 @@ export const listConversations = async (sessionId, { limit, offset }) => {
   return {
     data: conversations.map((conversation) => ({
       jid: conversation.jid,
-      name: conversation.name?.trim() || extractNumberFromJid(conversation.jid),
+      name: conversation.name?.trim() || resolveDisplayName(conversation.jid),
       lastMessage: conversation.lastMessage,
     })),
     metadata: {
       limit,
       offset,
-      activeHours: 48,
+      activeHours: 24,
       totalItems,
       hasMore: offset + conversations.length < totalItems,
     },
@@ -260,7 +276,8 @@ export const listConversationMessages = async (
   jid,
   { limit, offset },
 ) => {
-  const where = { sessionId, jid };
+  const activeSince = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  const where = { sessionId, jid, sentAt: { gte: activeSince } };
   const [messages, totalItems] = await prisma.$transaction([
     prisma.whatsappMessage.findMany({
       where,
@@ -276,6 +293,7 @@ export const listConversationMessages = async (
     metadata: {
       limit,
       offset,
+      activeHours: 48,
       totalItems,
       hasMore: offset + messages.length < totalItems,
       nextOffset: offset + messages.length,
