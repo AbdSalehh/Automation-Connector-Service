@@ -35,6 +35,8 @@ model WhatsappMessage {
   name           String               @default("")
   messageType    String               @default("text")
   media          Json?
+  replyTo        Json?
+  call           Json?
   fromMe         Boolean              @default(false)
   sentAt         DateTime
   receivedAt     DateTime?

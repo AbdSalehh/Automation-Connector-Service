@@ -57,6 +57,9 @@ const reconnectAttempts = new Map();
  */
 const startingSessions = new Set();
 
+/** Menyimpan waktu call diterima per call ID untuk menghitung durasi. */
+const activeCalls = new Map();
+
 const RECONNECT_BASE_DELAY_MS = 3000;
 const RECONNECT_MAX_DELAY_MS = 60000;
 
@@ -269,6 +272,49 @@ const downloadAndUploadMedia = async (
  * mencegah perulangan tak terbatas. Media (gambar/video/audio/dokumen)
  * diunduh lalu diunggah ke Cloudinary, dan URL-nya disertakan di payload.
  */
+const extractReplyContext = (messageContent) => {
+  const content = unwrapMessage(messageContent);
+  const contentEntry = Object.values(content || {}).find(
+    (value) => value?.contextInfo,
+  );
+  const contextInfo = contentEntry?.contextInfo;
+
+  if (!contextInfo?.stanzaId || !contextInfo.quotedMessage) {
+    return null;
+  }
+
+  return {
+    id: contextInfo.stanzaId,
+    senderJid: contextInfo.participant || null,
+    message: extractMessageText(contextInfo.quotedMessage),
+    messageType: detectMessageType(unwrapMessage(contextInfo.quotedMessage)),
+  };
+};
+
+const resolveConversationName = async (socket, remoteJid, contactNames) => {
+  const storedName = contactNames?.get(remoteJid) || "";
+
+  if (storedName) {
+    return storedName;
+  }
+
+  if (remoteJid.endsWith("@g.us")) {
+    try {
+      const metadata = await socket.groupMetadata(remoteJid);
+      return metadata.subject || "Grup WhatsApp";
+    } catch (error) {
+      logger.warn(
+        { err: error?.message, remoteJid },
+        "Nama grup WhatsApp tidak dapat diambil",
+      );
+
+      return "Grup WhatsApp";
+    }
+  }
+
+  return "";
+};
+
 const createIncomingMessageHandler = (sessionId) => {
   return async ({ messages, type }) => {
     if (type !== "notify") {
@@ -282,7 +328,7 @@ const createIncomingMessageHandler = (sessionId) => {
 
       const remoteJid = incomingMessage.key.remoteJid || "";
 
-      if (remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") {
+      if (remoteJid === "status@broadcast") {
         continue;
       }
 
@@ -302,6 +348,13 @@ const createIncomingMessageHandler = (sessionId) => {
       const messageContent = unwrapMessage(incomingMessage.message);
       const messageType = detectMessageType(messageContent);
       const isMedia = messageType !== "text";
+      const replyTo = extractReplyContext(incomingMessage.message);
+      const session = sessions.get(sessionId);
+      const conversationName = isFromMe
+        ? ""
+        : remoteJid.endsWith("@g.us")
+          ? await resolveConversationName(session?.socket, remoteJid)
+          : senderName;
 
       /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
       if (!messageText && !isMedia) {
@@ -341,8 +394,10 @@ const createIncomingMessageHandler = (sessionId) => {
         sender,
         message: messageText,
         name: senderName,
+        conversationName,
         messageType,
         media,
+        replyTo,
         fromMe: isFromMe,
         sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
         receivedAt: new Date().toISOString(),
@@ -371,6 +426,73 @@ const createIncomingMessageHandler = (sessionId) => {
 
         await forwardInboundMessage(inboundPayload);
         await publishInboundMessage(sessionId, inboundPayload);
+      }
+    }
+  };
+};
+
+const createCallHandler = (sessionId) => {
+  return async (callEvents) => {
+    const session = sessions.get(sessionId);
+
+    for (const callEvent of callEvents || []) {
+      const conversationJid = callEvent.groupJid || callEvent.chatId;
+
+      if (!conversationJid || !callEvent.id) {
+        continue;
+      }
+
+      const callKey = `${sessionId}:${callEvent.id}`;
+      const previousCall = activeCalls.get(callKey) || {};
+      const callDate = callEvent.date || new Date();
+
+      if (callEvent.status === "accept") {
+        activeCalls.set(callKey, {
+          ...previousCall,
+          acceptedAt: callDate,
+        });
+      }
+
+      const acceptedAt = previousCall.acceptedAt;
+      const durationSeconds =
+        callEvent.status === "terminate" && acceptedAt
+          ? Math.max(
+              0,
+              Math.round((new Date(callDate) - new Date(acceptedAt)) / 1000),
+            )
+          : null;
+      const conversationName = callEvent.isGroup
+        ? await resolveConversationName(session?.socket, conversationJid)
+        : "";
+      const isFromMe = callEvent.from === session?.socket?.user?.id;
+      const call = {
+        id: callEvent.id,
+        status: callEvent.status,
+        isVideo: Boolean(callEvent.isVideo),
+        isGroup: Boolean(callEvent.isGroup),
+        durationSeconds,
+      };
+      const chatMessage = {
+        id: `call:${callEvent.id}`,
+        jid: conversationJid,
+        sender: extractNumberFromJid(callEvent.from),
+        message: callEvent.isVideo ? "Video call" : "Panggilan suara",
+        name: "",
+        conversationName,
+        messageType: "call",
+        media: null,
+        replyTo: null,
+        call,
+        fromMe: isFromMe,
+        sentAt: new Date(callDate).toISOString(),
+        receivedAt: new Date().toISOString(),
+      };
+
+      await addChatMessage(sessionId, conversationJid, chatMessage);
+      await publishChatUpdate(sessionId, chatMessage);
+
+      if (["terminate", "reject", "timeout"].includes(callEvent.status)) {
+        activeCalls.delete(callKey);
       }
     }
   };
@@ -421,11 +543,7 @@ const createHistoryMessageHandler = (sessionId) => {
     for (const chat of chats || []) {
       const chatJid = chat.id || "";
 
-      if (
-        !chatJid ||
-        chatJid.endsWith("@g.us") ||
-        chatJid === "status@broadcast"
-      ) {
+      if (!chatJid || chatJid === "status@broadcast") {
         continue;
       }
 
@@ -455,11 +573,7 @@ const createHistoryMessageHandler = (sessionId) => {
     const storeHistoryMessage = async (historyMessage) => {
       const remoteJid = historyMessage.key?.remoteJid || "";
 
-      if (
-        !historyMessage.message ||
-        remoteJid.endsWith("@g.us") ||
-        remoteJid === "status@broadcast"
-      ) {
+      if (!historyMessage.message || remoteJid === "status@broadcast") {
         return;
       }
 
@@ -471,6 +585,8 @@ const createHistoryMessageHandler = (sessionId) => {
         : resolveSenderNumber(historyMessage.key);
       const contactName =
         contactNames.get(remoteJid) || historyMessage.pushName || "";
+      const conversationName = contactNames.get(remoteJid) || "";
+      const replyTo = extractReplyContext(historyMessage.message);
 
       if (!messageText && messageType === "text") {
         return;
@@ -484,8 +600,10 @@ const createHistoryMessageHandler = (sessionId) => {
           sender,
           message: messageText,
           name: contactName,
+          conversationName,
           messageType,
           media: null,
+          replyTo,
           fromMe: Boolean(historyMessage.key.fromMe),
           sentAt: convertUnixToIso(historyMessage.messageTimestamp),
           receivedAt: null,
@@ -776,6 +894,7 @@ export const startSession = async (sessionId) => {
       createConnectionUpdateHandler(sessionId, socket),
     );
     socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
+    socket.ev.on("call", createCallHandler(sessionId));
     socket.ev.on(
       "messaging-history.set",
       createHistoryMessageHandler(sessionId),

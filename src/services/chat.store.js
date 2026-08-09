@@ -27,8 +27,11 @@ const normalizeMessage = (jid, message) => ({
   sender: message.sender || null,
   message: message.message || "",
   name: message.name || "",
+  conversationName: message.conversationName?.trim() || "",
   messageType: message.messageType || "text",
   media: message.media || null,
+  replyTo: message.replyTo || null,
+  call: message.call || null,
   fromMe: Boolean(message.fromMe),
   sentAt: toDate(message.sentAt || message.receivedAt),
   receivedAt: message.receivedAt ? toDate(message.receivedAt) : null,
@@ -48,6 +51,8 @@ const serializeMessage = (message) => ({
   name: message.name,
   messageType: message.messageType,
   media: message.media,
+  replyTo: message.replyTo,
+  call: message.call,
   fromMe: message.fromMe,
   sentAt: message.sentAt.toISOString(),
   receivedAt: message.receivedAt?.toISOString() || null,
@@ -110,11 +115,13 @@ export const addChatMessage = async (
         create: {
           sessionId,
           jid,
-          name: normalizedMessage.name,
+          name: normalizedMessage.conversationName,
           lastMessage: toLastMessage(normalizedMessage),
           lastSentAt: normalizedMessage.sentAt,
         },
-        update: normalizedMessage.name ? { name: normalizedMessage.name } : {},
+        update: normalizedMessage.conversationName
+          ? { name: normalizedMessage.conversationName }
+          : {},
       });
 
       await transaction.whatsappMessage.upsert({
@@ -134,18 +141,25 @@ export const addChatMessage = async (
           name: normalizedMessage.name,
           messageType: normalizedMessage.messageType,
           media: normalizedMessage.media,
+          replyTo: normalizedMessage.replyTo,
+          call: normalizedMessage.call,
           fromMe: normalizedMessage.fromMe,
           sentAt: normalizedMessage.sentAt,
           receivedAt: normalizedMessage.receivedAt,
         },
-        update: {},
+        update: {
+          message: normalizedMessage.message,
+          messageType: normalizedMessage.messageType,
+          call: normalizedMessage.call,
+          sentAt: normalizedMessage.sentAt,
+        },
       });
 
       if (normalizedMessage.sentAt >= conversation.lastSentAt) {
         await transaction.whatsappConversation.update({
           where: { id: conversation.id },
           data: {
-            name: normalizedMessage.name || conversation.name,
+            name: normalizedMessage.conversationName || conversation.name,
             lastMessage: toLastMessage(normalizedMessage),
             lastSentAt: normalizedMessage.sentAt,
           },

@@ -5,3 +5,6 @@ docs/
 *.log
 npm-debug.log*
 .DS_Store
+
+prisma/
+.vscode
