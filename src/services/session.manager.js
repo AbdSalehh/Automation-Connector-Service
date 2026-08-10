@@ -59,8 +59,44 @@ const reconnectAttempts = new Map();
  */
 const startingSessions = new Set();
 
-/** Menyimpan waktu call diterima per call ID untuk menghitung durasi. */
 const activeCalls = new Map();
+
+const normalizeIdentityJid = (jid) => {
+  if (!jid) {
+    return "";
+  }
+
+  const [identity, server] = String(jid).split("@");
+  const [user] = identity.split(":");
+
+  return server ? `${user}@${server}` : String(jid);
+};
+
+const getSessionIdentityJids = (session) =>
+  new Set(
+    [
+      session?.socket?.user?.id,
+      session?.socket?.user?.lid,
+      ...(session?.identityJids || []),
+    ]
+      .map(normalizeIdentityJid)
+      .filter(Boolean),
+  );
+
+const findConnectedSessionByJids = (candidateJids, excludedSessionId) => {
+  const normalizedCandidates = new Set(
+    candidateJids.map(normalizeIdentityJid).filter(Boolean),
+  );
+
+  return [...sessions.entries()].find(
+    ([candidateSessionId, candidateSession]) =>
+      candidateSessionId !== excludedSessionId &&
+      candidateSession.status === "open" &&
+      [...getSessionIdentityJids(candidateSession)].some((identityJid) =>
+        normalizedCandidates.has(identityJid),
+      ),
+  );
+};
 
 const RECONNECT_BASE_DELAY_MS = 3000;
 const RECONNECT_MAX_DELAY_MS = 60000;
@@ -497,27 +533,52 @@ const createCallHandler = (sessionId) => {
       }
 
       let conversationJid = rawConversationJid;
+      let callerSessionEntry = null;
 
       if (!callEvent.isGroup) {
-        const candidateJids = [rawConversationJid, callEvent.from].filter(
+        const participantJids = [rawConversationJid, callEvent.from].filter(
           Boolean,
         );
-        const resolvedCandidateJids = await Promise.all(
-          candidateJids.map(async (candidateJid) => {
-            const locallyResolvedJid = resolveCanonicalJid({
-              remoteJid: candidateJid,
-            });
 
-            return resolveStoredCanonicalJid(sessionId, locallyResolvedJid);
-          }),
+        callerSessionEntry = findConnectedSessionByJids(
+          participantJids,
+          sessionId,
         );
 
-        conversationJid =
-          resolvedCandidateJids.find((candidateJid) =>
-            candidateJid?.endsWith("@s.whatsapp.net"),
-          ) ||
-          resolvedCandidateJids[0] ||
-          rawConversationJid;
+        if (callerSessionEntry) {
+          const [, callerSession] = callerSessionEntry;
+
+          conversationJid = toWhatsappJid(callerSession.phoneNumber);
+
+          for (const participantJid of participantJids) {
+            if (participantJid.endsWith("@lid")) {
+              await registerJidAlias(
+                sessionId,
+                normalizeIdentityJid(participantJid),
+                conversationJid,
+                callerSession.name || "",
+              );
+            }
+          }
+        } else {
+          const locallyResolvedJid = resolveCanonicalJid({
+            remoteJid: rawConversationJid,
+          });
+
+          conversationJid = await resolveStoredCanonicalJid(
+            sessionId,
+            locallyResolvedJid,
+          );
+
+          if (!conversationJid.endsWith("@s.whatsapp.net")) {
+            logger.warn(
+              { sessionId, callId: callEvent.id, participantJids },
+              "Call diabaikan karena identitas peserta belum dapat diresolusi",
+            );
+
+            continue;
+          }
+        }
       }
 
       const callKey = `${sessionId}:${callEvent.id}`;
@@ -560,17 +621,14 @@ const createCallHandler = (sessionId) => {
           "";
       }
 
-      const sessionUserJid = session?.socket?.user?.id || "";
-      const canonicalSessionUserJid = resolveCanonicalJid({
-        remoteJid: sessionUserJid,
-      });
-      const canonicalCallerJid = await resolveStoredCanonicalJid(
-        sessionId,
-        callEvent.from || "",
-      );
-      const isFromMe =
-        canonicalCallerJid === canonicalSessionUserJid ||
-        callEvent.from === sessionUserJid;
+      const sessionUserJid = toWhatsappJid(session?.phoneNumber || "");
+      const canonicalCallerJid = callerSessionEntry
+        ? toWhatsappJid(callerSessionEntry[1].phoneNumber)
+        : await resolveStoredCanonicalJid(
+            sessionId,
+            callEvent.from || conversationJid,
+          );
+      const isFromMe = !callEvent.isGroup && !callerSessionEntry;
       const call = {
         id: callEvent.id,
         status: callEvent.status,
@@ -597,40 +655,37 @@ const createCallHandler = (sessionId) => {
       await addChatMessage(sessionId, conversationJid, chatMessage);
       await publishChatUpdate(sessionId, chatMessage);
 
-      if (!callEvent.isGroup && !isFromMe) {
-        const callerNumber = extractNumberFromJid(canonicalCallerJid);
-        const callerSessionEntry = [...sessions.entries()].find(
-          ([candidateSessionId, candidateSession]) =>
-            candidateSessionId !== sessionId &&
-            candidateSession?.socket?.user?.id &&
-            extractNumberFromJid(candidateSession.socket.user.id) ===
-              callerNumber,
-        );
+      if (!callEvent.isGroup && callerSessionEntry) {
+        const [callerSessionId, callerSession] = callerSessionEntry;
+        const receiverJid = sessionUserJid;
+        const callerContactNames = await getContactNames(callerSessionId, [
+          receiverJid,
+        ]);
+        const receiverName =
+          callerContactNames.get(receiverJid) || session?.name || "";
 
-        if (callerSessionEntry) {
-          const [callerSessionId] = callerSessionEntry;
-          const receiverNumber = extractNumberFromJid(canonicalSessionUserJid);
-          const receiverJid = toWhatsappJid(receiverNumber);
-          const callerContactNames = await getContactNames(callerSessionId, [
-            receiverJid,
-            canonicalSessionUserJid,
-          ]);
-          const receiverName =
-            callerContactNames.get(receiverJid) ||
-            callerContactNames.get(canonicalSessionUserJid) ||
-            conversationName;
-          const callerChatMessage = {
-            ...chatMessage,
-            jid: receiverJid,
-            sender: callerNumber,
-            name: "",
-            conversationName: receiverName,
-            fromMe: true,
-          };
-
-          await addChatMessage(callerSessionId, receiverJid, callerChatMessage);
-          await publishChatUpdate(callerSessionId, callerChatMessage);
+        for (const identityJid of getSessionIdentityJids(session)) {
+          if (identityJid.endsWith("@lid")) {
+            await registerJidAlias(
+              callerSessionId,
+              identityJid,
+              receiverJid,
+              receiverName,
+            );
+          }
         }
+
+        const callerChatMessage = {
+          ...chatMessage,
+          jid: receiverJid,
+          sender: callerSession.phoneNumber,
+          name: "",
+          conversationName: receiverName,
+          fromMe: true,
+        };
+
+        await addChatMessage(callerSessionId, receiverJid, callerChatMessage);
+        await publishChatUpdate(callerSessionId, callerChatMessage);
       }
 
       if (["terminate", "reject", "timeout"].includes(callEvent.status)) {
@@ -770,6 +825,15 @@ const createConnectionUpdateHandler = (sessionId, ownerSocket) => {
       session.status = "open";
       session.qrDataUrl = null;
       session.phoneNumber = connectedPhoneNumber;
+      session.identityJids = Array.from(
+        new Set(
+          [
+            ...(session.identityJids || []),
+            session.socket?.user?.id,
+            session.socket?.user?.lid,
+          ].filter(Boolean),
+        ),
+      );
       session.name =
         session.socket?.user?.name || session.socket?.user?.notify || "";
       session.connectedAt = new Date().toISOString();
@@ -961,6 +1025,11 @@ export const startSession = async (sessionId) => {
       phoneNumber: existingSession?.phoneNumber || null,
       name: existingSession?.name || null,
       connectedAt: existingSession?.connectedAt || null,
+      identityJids: [
+        state.creds?.me?.id,
+        state.creds?.me?.lid,
+        ...(existingSession?.identityJids || []),
+      ].filter(Boolean),
     });
 
     socket.ev.on("creds.update", saveCreds);
