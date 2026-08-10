@@ -352,10 +352,10 @@ const createIncomingMessageHandler = (sessionId) => {
       const replyTo = extractReplyContext(incomingMessage.message);
       const session = sessions.get(sessionId);
       const conversationJid = resolveCanonicalJid(incomingMessage.key);
-      const conversationName = isFromMe
-        ? ""
-        : remoteJid.endsWith("@g.us")
-          ? await resolveConversationName(session?.socket, remoteJid)
+      const conversationName = remoteJid.endsWith("@g.us")
+        ? await resolveConversationName(session?.socket, remoteJid)
+        : isFromMe
+          ? ""
           : senderName;
 
       /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
@@ -506,6 +506,7 @@ const createCallHandler = (sessionId) => {
 
 const createHistoryMessageHandler = (sessionId) => {
   return async ({ chats, contacts, messages, syncType, progress }) => {
+    const session = sessions.get(sessionId);
     const contactNames = new Map();
     const affectedConversationJids = new Set();
     let storedMessageCount = 0;
@@ -591,7 +592,13 @@ const createHistoryMessageHandler = (sessionId) => {
         : resolveSenderNumber(historyMessage.key);
       const contactName =
         contactNames.get(remoteJid) || historyMessage.pushName || "";
-      const conversationName = contactNames.get(remoteJid) || "";
+      const conversationName = remoteJid.endsWith("@g.us")
+        ? await resolveConversationName(
+            session?.socket,
+            remoteJid,
+            contactNames,
+          )
+        : contactNames.get(remoteJid) || "";
       const replyTo = extractReplyContext(historyMessage.message);
       const conversationJid = resolveCanonicalJid(historyMessage.key);
 
