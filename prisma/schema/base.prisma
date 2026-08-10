@@ -9,6 +9,16 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+model WhatsappSession {
+  id        String   @id @default(uuid())
+  sessionId String   @unique
+  ownerId   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId, updatedAt(sort: Desc)])
+}
+
 model WhatsappConversation {
   id          String            @id @default(uuid())
   sessionId   String

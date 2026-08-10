@@ -5,6 +5,7 @@ dotenv.config();
 export const env = {
   port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3001,
   apiKey: (process.env.API_KEY || "").trim(),
+  baileysOwnerSecret: (process.env.BAILEYS_OWNER_SECRET || "").trim(),
   autoflowWebhookUrl: (process.env.AUTOFLOW_WEBHOOK_URL || "").trim(),
   authFolder: (process.env.AUTH_FOLDER || "./auth_info_baileys").trim(),
   corsOrigins: process.env.CORS_ORIGINS
@@ -34,6 +35,12 @@ export const validateEnv = (logger) => {
   if (!env.apiKey) {
     logger.warn(
       "API_KEY belum diatur. Endpoint tidak akan aman, segera isi di file .env",
+    );
+  }
+
+  if (!env.baileysOwnerSecret) {
+    logger.warn(
+      "BAILEYS_OWNER_SECRET belum diatur. Endpoint sesi tidak dapat memverifikasi kepemilikan user",
     );
   }
 

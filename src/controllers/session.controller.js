@@ -1,24 +1,38 @@
+import crypto from "crypto";
+
 import { sendSuccess, sendError } from "../lib/apiResponse.js";
 import {
   getSessionStatus,
   startSession,
-  getAllSessions,
   deleteSession,
   confirmDuplicateSession,
   cancelDuplicateSession,
 } from "../services/session.manager.js";
+import {
+  createOwnedSession,
+  deleteSessionOwnership,
+  listOwnedSessionIds,
+} from "../services/session-ownership.store.js";
 import { sanitizeSessionId } from "../lib/sessionId.js";
 
-/**
- * Controller untuk mengambil status sebuah sesi WhatsApp.
- * Jika sesi belum ada di memori, sesi akan dimulai otomatis
- * agar QR code langsung tersedia untuk discan.
- */
-export const handleGetSessionStatus = async (req, res) => {
-  const sessionId = sanitizeSessionId(req.params.sessionId);
+export const handleCreateSession = async (request, response) => {
+  const sessionId = crypto.randomUUID();
+
+  await createOwnedSession(request.ownerId, sessionId);
+  await startSession(sessionId);
+
+  return sendSuccess(response, {
+    statusCode: 201,
+    message: "Sesi WhatsApp berhasil dibuat",
+    data: getSessionStatus(sessionId),
+  });
+};
+
+export const handleGetSessionStatus = async (request, response) => {
+  const sessionId = sanitizeSessionId(request.params.sessionId);
 
   if (!sessionId) {
-    return sendError(res, {
+    return sendError(response, {
       statusCode: 400,
       message: "Format sessionId tidak valid",
     });
@@ -31,7 +45,7 @@ export const handleGetSessionStatus = async (req, res) => {
     session = getSessionStatus(sessionId);
   }
 
-  return sendSuccess(res, {
+  return sendSuccess(response, {
     statusCode: 200,
     message: "Status sesi WhatsApp berhasil diambil",
     data: session,
@@ -41,32 +55,42 @@ export const handleGetSessionStatus = async (req, res) => {
 /**
  * Controller untuk menampilkan daftar seluruh sesi yang dikelola.
  */
-export const handleListSessions = (req, res) => {
-  const sessions = getAllSessions();
+export const handleListSessions = async (request, response) => {
+  const ownedSessionIds = await listOwnedSessionIds(request.ownerId);
+  const sessions = await Promise.all(
+    ownedSessionIds.map(async (sessionId) => {
+      if (!getSessionStatus(sessionId)) {
+        await startSession(sessionId);
+      }
 
-  return sendSuccess(res, {
+      return getSessionStatus(sessionId);
+    }),
+  );
+
+  return sendSuccess(response, {
     statusCode: 200,
     message: "Daftar sesi berhasil diambil",
-    data: sessions,
+    data: sessions.filter(Boolean),
   });
 };
 
 /**
  * Controller untuk logout sekaligus menghapus sebuah sesi.
  */
-export const handleDeleteSession = async (req, res) => {
-  const sessionId = sanitizeSessionId(req.params.sessionId);
+export const handleDeleteSession = async (request, response) => {
+  const sessionId = sanitizeSessionId(request.params.sessionId);
 
   if (!sessionId) {
-    return sendError(res, {
+    return sendError(response, {
       statusCode: 400,
       message: "Format sessionId tidak valid",
     });
   }
 
   await deleteSession(sessionId);
+  await deleteSessionOwnership(request.ownerId, sessionId);
 
-  return sendSuccess(res, {
+  return sendSuccess(response, {
     statusCode: 200,
     message: "Sesi berhasil dihapus dan dilogout",
     data: null,
@@ -87,14 +111,24 @@ export const handleConfirmDuplicateSession = async (req, res) => {
     });
   }
 
-  const confirmed = await confirmDuplicateSession(sessionId);
+  const ownedSessionIds = await listOwnedSessionIds(req.ownerId);
+  const deletedSessionIds = await confirmDuplicateSession(
+    sessionId,
+    ownedSessionIds,
+  );
 
-  if (!confirmed) {
+  if (!deletedSessionIds) {
     return sendError(res, {
       statusCode: 409,
       message: "Tidak ada konflik nomor yang menunggu konfirmasi",
     });
   }
+
+  await Promise.all(
+    deletedSessionIds.map((deletedSessionId) =>
+      deleteSessionOwnership(req.ownerId, deletedSessionId),
+    ),
+  );
 
   return sendSuccess(res, {
     statusCode: 200,
@@ -125,6 +159,8 @@ export const handleCancelDuplicateSession = async (req, res) => {
       message: "Tidak ada konflik nomor yang menunggu konfirmasi",
     });
   }
+
+  await deleteSessionOwnership(req.ownerId, sessionId);
 
   return sendSuccess(res, {
     statusCode: 200,

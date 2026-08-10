@@ -928,24 +928,32 @@ const detectDuplicateSessions = async (currentSessionId, phoneNumber) => {
  * Melanjutkan sesi yang menunggu konfirmasi duplikat: logout seluruh sesi lama
  * dengan nomor yang sama lalu membersihkan status pending.
  */
-export const confirmDuplicateSession = async (sessionId) => {
+export const confirmDuplicateSession = async (
+  sessionId,
+  permittedSessionIds,
+) => {
   const session = sessions.get(sessionId);
 
   if (!session?.pendingDuplicate) {
-    return false;
+    return null;
   }
 
+  const permittedSessionIdSet = new Set(permittedSessionIds);
+  const deletedSessionIds = [];
   const { conflictingSessionIds } = session.pendingDuplicate;
 
   for (const otherSessionId of conflictingSessionIds) {
-    await deleteSession(otherSessionId);
+    if (permittedSessionIdSet.has(otherSessionId)) {
+      await deleteSession(otherSessionId);
+      deletedSessionIds.push(otherSessionId);
+    }
   }
 
   session.pendingDuplicate = null;
 
   await publishSessionUpdate(sessionId, getSessionStatus(sessionId));
 
-  return true;
+  return deletedSessionIds;
 };
 
 /**
