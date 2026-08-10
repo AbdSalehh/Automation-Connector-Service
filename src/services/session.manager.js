@@ -496,9 +496,18 @@ const createCallHandler = (sessionId) => {
         continue;
       }
 
-      const conversationJid = callEvent.isGroup
-        ? rawConversationJid
-        : resolveCanonicalJid({ remoteJid: rawConversationJid });
+      let conversationJid = rawConversationJid;
+
+      if (!callEvent.isGroup) {
+        const locallyResolvedJid = resolveCanonicalJid({
+          remoteJid: rawConversationJid,
+        });
+
+        conversationJid = await resolveStoredCanonicalJid(
+          sessionId,
+          locallyResolvedJid,
+        );
+      }
 
       const callKey = `${sessionId}:${callEvent.id}`;
       const previousCall = activeCalls.get(callKey) || {};
@@ -519,10 +528,36 @@ const createCallHandler = (sessionId) => {
               Math.round((new Date(callDate) - new Date(acceptedAt)) / 1000),
             )
           : null;
-      const conversationName = callEvent.isGroup
-        ? await resolveConversationName(session?.socket, conversationJid)
-        : "";
-      const isFromMe = callEvent.from === session?.socket?.user?.id;
+      let conversationName = "";
+
+      if (callEvent.isGroup) {
+        conversationName = await resolveConversationName(
+          session?.socket,
+          conversationJid,
+        );
+      } else {
+        const contactNames = await getContactNames(sessionId, [
+          conversationJid,
+          rawConversationJid,
+        ]);
+
+        conversationName =
+          contactNames.get(conversationJid) ||
+          contactNames.get(rawConversationJid) ||
+          "";
+      }
+
+      const sessionUserJid = session?.socket?.user?.id || "";
+      const canonicalSessionUserJid = resolveCanonicalJid({
+        remoteJid: sessionUserJid,
+      });
+      const canonicalCallerJid = await resolveStoredCanonicalJid(
+        sessionId,
+        callEvent.from || "",
+      );
+      const isFromMe =
+        canonicalCallerJid === canonicalSessionUserJid ||
+        callEvent.from === sessionUserJid;
       const call = {
         id: callEvent.id,
         status: callEvent.status,
@@ -533,9 +568,9 @@ const createCallHandler = (sessionId) => {
       const chatMessage = {
         id: `call:${callEvent.id}`,
         jid: conversationJid,
-        sender: extractNumberFromJid(callEvent.from),
-        message: callEvent.isVideo ? "Video call" : "Panggilan suara",
-        name: "",
+        sender: extractNumberFromJid(canonicalCallerJid),
+        message: callEvent.isVideo ? "Video call" : "Voice call",
+        name: isFromMe ? "" : conversationName,
         conversationName,
         messageType: "call",
         media: null,
