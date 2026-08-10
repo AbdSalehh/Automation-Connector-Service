@@ -24,7 +24,10 @@ export const handleCreateSession = async (request, response) => {
   return sendSuccess(response, {
     statusCode: 201,
     message: "Sesi WhatsApp berhasil dibuat",
-    data: getSessionStatus(sessionId),
+    data: {
+      sessionId,
+      session: getSessionStatus(sessionId),
+    },
   });
 };
 
