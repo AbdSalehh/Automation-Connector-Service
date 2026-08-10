@@ -29,8 +29,10 @@ import {
   addChatMessage,
   clearSessionChatCache,
   finalizeHistoryBatch,
+  getContactNames,
   seedConversation,
   updateConversationName,
+  upsertContactNames,
 } from "./chat.store.js";
 
 /**
@@ -292,6 +294,25 @@ const extractReplyContext = (messageContent) => {
   };
 };
 
+const extractMentionJids = (messageContent) => {
+  const content = unwrapMessage(messageContent);
+  const contentEntry = Object.values(content || {}).find(
+    (value) => value?.contextInfo?.mentionedJid?.length,
+  );
+
+  return Array.from(new Set(contentEntry?.contextInfo?.mentionedJid || []));
+};
+
+const resolveMentions = (mentionJids, contactNames) =>
+  mentionJids.map((mentionJid) => ({
+    jid: mentionJid,
+    number: extractNumberFromJid(mentionJid),
+    name:
+      contactNames.get(mentionJid) ||
+      extractNumberFromJid(mentionJid) ||
+      "Kontak WhatsApp",
+  }));
+
 const resolveConversationName = async (socket, remoteJid, contactNames) => {
   const storedName = contactNames?.get(remoteJid) || "";
 
@@ -344,9 +365,21 @@ const createIncomingMessageHandler = (sessionId) => {
         ? extractNumberFromJid(remoteJid)
         : resolveSenderNumber(incomingMessage.key);
       const messageText = extractMessageText(incomingMessage.message);
-      const senderName = incomingMessage.pushName || "";
-
       const messageContent = unwrapMessage(incomingMessage.message);
+      const mentionJids = extractMentionJids(incomingMessage.message);
+      const senderJid =
+        incomingMessage.key.participant ||
+        incomingMessage.key.participantPn ||
+        remoteJid;
+      const contactNames = await getContactNames(sessionId, [
+        senderJid,
+        remoteJid,
+        ...mentionJids,
+      ]);
+      const senderName =
+        contactNames.get(senderJid) || incomingMessage.pushName || "";
+      const mentions = resolveMentions(mentionJids, contactNames);
+
       const messageType = detectMessageType(messageContent);
       const isMedia = messageType !== "text";
       const replyTo = extractReplyContext(incomingMessage.message);
@@ -354,9 +387,7 @@ const createIncomingMessageHandler = (sessionId) => {
       const conversationJid = resolveCanonicalJid(incomingMessage.key);
       const conversationName = remoteJid.endsWith("@g.us")
         ? await resolveConversationName(session?.socket, remoteJid)
-        : isFromMe
-          ? ""
-          : senderName;
+        : contactNames.get(remoteJid) || (isFromMe ? "" : senderName);
 
       /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
       if (!messageText && !isMedia) {
@@ -400,6 +431,7 @@ const createIncomingMessageHandler = (sessionId) => {
         messageType,
         media,
         replyTo,
+        mentions,
         fromMe: isFromMe,
         sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
         receivedAt: new Date().toISOString(),
@@ -542,6 +574,14 @@ const createHistoryMessageHandler = (sessionId) => {
       }
     }
 
+    await upsertContactNames(
+      sessionId,
+      Array.from(contactNames.entries()).map(([contactJid, contactName]) => ({
+        jid: contactJid,
+        name: contactName,
+      })),
+    );
+
     /**
      * Seed conversation dari daftar chat WhatsApp. Daftar ini mencerminkan
      * seluruh percakapan di ponsel, sehingga tidak hanya chat yang kebetulan
@@ -587,11 +627,20 @@ const createHistoryMessageHandler = (sessionId) => {
       const messageContent = unwrapMessage(historyMessage.message);
       const messageType = detectMessageType(messageContent);
       const messageText = extractMessageText(historyMessage.message);
+      const mentionJids = extractMentionJids(historyMessage.message);
+      const senderJid =
+        historyMessage.key.participant ||
+        historyMessage.key.participantPn ||
+        remoteJid;
       const sender = historyMessage.key.fromMe
         ? extractNumberFromJid(remoteJid)
         : resolveSenderNumber(historyMessage.key);
       const contactName =
-        contactNames.get(remoteJid) || historyMessage.pushName || "";
+        contactNames.get(senderJid) ||
+        historyMessage.pushName ||
+        contactNames.get(remoteJid) ||
+        "";
+      const mentions = resolveMentions(mentionJids, contactNames);
       const conversationName = remoteJid.endsWith("@g.us")
         ? await resolveConversationName(
             session?.socket,
@@ -618,6 +667,7 @@ const createHistoryMessageHandler = (sessionId) => {
           messageType,
           media: null,
           replyTo,
+          mentions,
           fromMe: Boolean(historyMessage.key.fromMe),
           sentAt: convertUnixToIso(historyMessage.messageTimestamp),
           receivedAt: null,

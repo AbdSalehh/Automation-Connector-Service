@@ -24,6 +24,18 @@ model WhatsappConversation {
   @@index([sessionId, lastSentAt(sort: Desc)])
 }
 
+model WhatsappContact {
+  id        String   @id @default(uuid())
+  sessionId String
+  jid       String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sessionId, jid])
+  @@index([sessionId, name])
+}
+
 model WhatsappMessage {
   id             String               @id @default(uuid())
   whatsappId     String
@@ -36,6 +48,7 @@ model WhatsappMessage {
   messageType    String               @default("text")
   media          Json?
   replyTo        Json?
+  mentions       Json?
   call           Json?
   fromMe         Boolean              @default(false)
   sentAt         DateTime

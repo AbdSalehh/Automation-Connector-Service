@@ -31,6 +31,7 @@ const normalizeMessage = (jid, message) => ({
   messageType: message.messageType || "text",
   media: message.media || null,
   replyTo: message.replyTo || null,
+  mentions: message.mentions || null,
   call: message.call || null,
   fromMe: Boolean(message.fromMe),
   sentAt: toDate(message.sentAt || message.receivedAt),
@@ -52,6 +53,7 @@ const serializeMessage = (message) => ({
   messageType: message.messageType,
   media: message.media,
   replyTo: message.replyTo,
+  mentions: message.mentions,
   call: message.call,
   fromMe: message.fromMe,
   sentAt: message.sentAt.toISOString(),
@@ -142,6 +144,7 @@ export const addChatMessage = async (
           messageType: normalizedMessage.messageType,
           media: normalizedMessage.media,
           replyTo: normalizedMessage.replyTo,
+          mentions: normalizedMessage.mentions,
           call: normalizedMessage.call,
           fromMe: normalizedMessage.fromMe,
           sentAt: normalizedMessage.sentAt,
@@ -150,6 +153,7 @@ export const addChatMessage = async (
         update: {
           message: normalizedMessage.message,
           messageType: normalizedMessage.messageType,
+          mentions: normalizedMessage.mentions,
           call: normalizedMessage.call,
           sentAt: normalizedMessage.sentAt,
         },
@@ -251,6 +255,43 @@ export const updateConversationName = async (sessionId, jid, name) => {
     where: { sessionId, jid },
     data: { name: name.trim() },
   });
+};
+
+export const upsertContactNames = async (sessionId, contacts) => {
+  const validContacts = contacts.filter(
+    (contact) => contact.jid && contact.name?.trim(),
+  );
+
+  await Promise.all(
+    validContacts.map((contact) =>
+      prisma.whatsappContact.upsert({
+        where: {
+          sessionId_jid: { sessionId, jid: contact.jid },
+        },
+        create: {
+          sessionId,
+          jid: contact.jid,
+          name: contact.name.trim(),
+        },
+        update: { name: contact.name.trim() },
+      }),
+    ),
+  );
+};
+
+export const getContactNames = async (sessionId, jids) => {
+  const uniqueJids = Array.from(new Set(jids.filter(Boolean)));
+
+  if (uniqueJids.length === 0) {
+    return new Map();
+  }
+
+  const contacts = await prisma.whatsappContact.findMany({
+    where: { sessionId, jid: { in: uniqueJids } },
+    select: { jid: true, name: true },
+  });
+
+  return new Map(contacts.map((contact) => [contact.jid, contact.name]));
 };
 
 export const listConversations = async (sessionId, { limit, offset }) => {
