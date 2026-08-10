@@ -499,34 +499,47 @@ const createCallHandler = (sessionId) => {
       let conversationJid = rawConversationJid;
 
       if (!callEvent.isGroup) {
-        const locallyResolvedJid = resolveCanonicalJid({
-          remoteJid: rawConversationJid,
-        });
-
-        conversationJid = await resolveStoredCanonicalJid(
-          sessionId,
-          locallyResolvedJid,
+        const candidateJids = [rawConversationJid, callEvent.from].filter(
+          Boolean,
         );
+        const resolvedCandidateJids = await Promise.all(
+          candidateJids.map(async (candidateJid) => {
+            const locallyResolvedJid = resolveCanonicalJid({
+              remoteJid: candidateJid,
+            });
+
+            return resolveStoredCanonicalJid(sessionId, locallyResolvedJid);
+          }),
+        );
+
+        conversationJid =
+          resolvedCandidateJids.find((candidateJid) =>
+            candidateJid?.endsWith("@s.whatsapp.net"),
+          ) ||
+          resolvedCandidateJids[0] ||
+          rawConversationJid;
       }
 
       const callKey = `${sessionId}:${callEvent.id}`;
-      const previousCall = activeCalls.get(callKey) || {};
-      const callDate = callEvent.date || new Date();
+      const previousCall = activeCalls.get(callKey);
+      const callDate = new Date(callEvent.date || Date.now());
+      const isNewCallAttempt = callEvent.status === "offer" || !previousCall;
+      const callState = {
+        messageId: isNewCallAttempt
+          ? `call:${callEvent.id}:${callDate.getTime()}`
+          : previousCall.messageId,
+        acceptedAt:
+          callEvent.status === "accept"
+            ? callDate
+            : (previousCall?.acceptedAt ?? null),
+        isVideo: callEvent.isVideo ?? previousCall?.isVideo ?? false,
+      };
 
-      if (callEvent.status === "accept") {
-        activeCalls.set(callKey, {
-          ...previousCall,
-          acceptedAt: callDate,
-        });
-      }
+      activeCalls.set(callKey, callState);
 
-      const acceptedAt = previousCall.acceptedAt;
       const durationSeconds =
-        callEvent.status === "terminate" && acceptedAt
-          ? Math.max(
-              0,
-              Math.round((new Date(callDate) - new Date(acceptedAt)) / 1000),
-            )
+        callEvent.status === "terminate" && callState.acceptedAt
+          ? Math.max(0, Math.round((callDate - callState.acceptedAt) / 1000))
           : null;
       let conversationName = "";
 
@@ -561,15 +574,15 @@ const createCallHandler = (sessionId) => {
       const call = {
         id: callEvent.id,
         status: callEvent.status,
-        isVideo: Boolean(callEvent.isVideo),
+        isVideo: callState.isVideo,
         isGroup: Boolean(callEvent.isGroup),
         durationSeconds,
       };
       const chatMessage = {
-        id: `call:${callEvent.id}`,
+        id: callState.messageId,
         jid: conversationJid,
         sender: extractNumberFromJid(canonicalCallerJid),
-        message: callEvent.isVideo ? "Video call" : "Voice call",
+        message: callState.isVideo ? "Video call" : "Voice call",
         name: isFromMe ? "" : conversationName,
         conversationName,
         messageType: "call",
@@ -577,7 +590,7 @@ const createCallHandler = (sessionId) => {
         replyTo: null,
         call,
         fromMe: isFromMe,
-        sentAt: new Date(callDate).toISOString(),
+        sentAt: callDate.toISOString(),
         receivedAt: new Date().toISOString(),
       };
 
