@@ -98,6 +98,38 @@ const enforceSessionLimits = async (sessionId) => {
   }
 };
 
+const ensureConversation = async (sessionId, jid, normalizedMessage) => {
+  try {
+    return await prisma.whatsappConversation.upsert({
+      where: { sessionId_jid: { sessionId, jid } },
+      create: {
+        sessionId,
+        jid,
+        name: normalizedMessage.conversationName,
+        lastMessage: toLastMessage(normalizedMessage),
+        lastSentAt: normalizedMessage.sentAt,
+      },
+      update: normalizedMessage.conversationName
+        ? { name: normalizedMessage.conversationName }
+        : {},
+    });
+  } catch (error) {
+    if (error?.code !== "P2002") {
+      throw error;
+    }
+
+    const conversation = await prisma.whatsappConversation.findUnique({
+      where: { sessionId_jid: { sessionId, jid } },
+    });
+
+    if (!conversation) {
+      throw error;
+    }
+
+    return conversation;
+  }
+};
+
 export const addChatMessage = async (
   sessionId,
   jid,
@@ -111,70 +143,61 @@ export const addChatMessage = async (
   const normalizedMessage = normalizeMessage(jid, message);
 
   try {
-    const conversationId = await prisma.$transaction(async (transaction) => {
-      const conversation = await transaction.whatsappConversation.upsert({
-        where: { sessionId_jid: { sessionId, jid } },
-        create: {
-          sessionId,
-          jid,
-          name: normalizedMessage.conversationName,
-          lastMessage: toLastMessage(normalizedMessage),
-          lastSentAt: normalizedMessage.sentAt,
-        },
-        update: normalizedMessage.conversationName
-          ? { name: normalizedMessage.conversationName }
-          : {},
-      });
+    const conversation = await ensureConversation(
+      sessionId,
+      jid,
+      normalizedMessage,
+    );
 
-      await transaction.whatsappMessage.upsert({
-        where: {
-          sessionId_whatsappId: {
-            sessionId,
-            whatsappId: normalizedMessage.id,
-          },
-        },
-        create: {
+    await prisma.whatsappMessage.upsert({
+      where: {
+        sessionId_whatsappId: {
+          sessionId,
           whatsappId: normalizedMessage.id,
-          conversationId: conversation.id,
-          sessionId,
-          jid,
-          sender: normalizedMessage.sender,
-          message: normalizedMessage.message,
-          name: normalizedMessage.name,
-          messageType: normalizedMessage.messageType,
-          media: normalizedMessage.media,
-          replyTo: normalizedMessage.replyTo,
-          mentions: normalizedMessage.mentions,
-          call: normalizedMessage.call,
-          fromMe: normalizedMessage.fromMe,
-          sentAt: normalizedMessage.sentAt,
-          receivedAt: normalizedMessage.receivedAt,
         },
-        update: {
-          message: normalizedMessage.message,
-          messageType: normalizedMessage.messageType,
-          mentions: normalizedMessage.mentions,
-          call: normalizedMessage.call,
-          sentAt: normalizedMessage.sentAt,
-        },
-      });
+      },
+      create: {
+        whatsappId: normalizedMessage.id,
+        conversationId: conversation.id,
+        sessionId,
+        jid,
+        sender: normalizedMessage.sender,
+        message: normalizedMessage.message,
+        name: normalizedMessage.name,
+        messageType: normalizedMessage.messageType,
+        media: normalizedMessage.media,
+        replyTo: normalizedMessage.replyTo,
+        mentions: normalizedMessage.mentions,
+        call: normalizedMessage.call,
+        fromMe: normalizedMessage.fromMe,
+        sentAt: normalizedMessage.sentAt,
+        receivedAt: normalizedMessage.receivedAt,
+      },
+      update: {
+        message: normalizedMessage.message,
+        messageType: normalizedMessage.messageType,
+        mentions: normalizedMessage.mentions,
+        call: normalizedMessage.call,
+        sentAt: normalizedMessage.sentAt,
+      },
+    });
 
-      if (normalizedMessage.sentAt >= conversation.lastSentAt) {
-        await transaction.whatsappConversation.update({
-          where: { id: conversation.id },
-          data: {
-            name: normalizedMessage.conversationName || conversation.name,
-            lastMessage: toLastMessage(normalizedMessage),
-            lastSentAt: normalizedMessage.sentAt,
-          },
-        });
-      }
-
-      return conversation.id;
+    await prisma.whatsappConversation.updateMany({
+      where: {
+        id: conversation.id,
+        lastSentAt: { lte: normalizedMessage.sentAt },
+      },
+      data: {
+        ...(normalizedMessage.conversationName
+          ? { name: normalizedMessage.conversationName }
+          : {}),
+        lastMessage: toLastMessage(normalizedMessage),
+        lastSentAt: normalizedMessage.sentAt,
+      },
     });
 
     if (!deferRetention) {
-      await enforceConversationLimit(conversationId);
+      await enforceConversationLimit(conversation.id);
       await enforceSessionLimits(sessionId);
     }
 

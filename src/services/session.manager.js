@@ -699,11 +699,9 @@ const createHistoryMessageHandler = (sessionId) => {
 
     await finalizeHistoryBatch(sessionId, Array.from(affectedConversationJids));
 
-    await Promise.all(
-      Array.from(contactNames.entries()).map(([contactJid, contactName]) =>
-        updateConversationName(sessionId, contactJid, contactName),
-      ),
-    );
+    for (const [contactJid, contactName] of contactNames.entries()) {
+      await updateConversationName(sessionId, contactJid, contactName);
+    }
 
     logger.info(
       {
