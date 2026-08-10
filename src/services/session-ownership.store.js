@@ -25,6 +25,22 @@ export const listOwnedSessionIds = async (ownerId) => {
   return sessions.map((session) => session.sessionId);
 };
 
+export const listSessionOwnerships = async () => {
+  return prisma.whatsappSession.findMany({
+    orderBy: { updatedAt: "desc" },
+    select: { ownerId: true, sessionId: true },
+  });
+};
+
+export const getSessionOwnerId = async (sessionId) => {
+  const session = await prisma.whatsappSession.findUnique({
+    where: { sessionId },
+    select: { ownerId: true },
+  });
+
+  return session?.ownerId ?? null;
+};
+
 export const deleteSessionOwnership = async (ownerId, sessionId) => {
   await prisma.whatsappSession.deleteMany({
     where: { ownerId, sessionId },

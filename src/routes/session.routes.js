@@ -9,10 +9,12 @@ import {
   handleDeleteSession,
   handleConfirmDuplicateSession,
   handleCancelDuplicateSession,
+  handleListAllSessions,
 } from "../controllers/session.controller.js";
 
 const sessionRouter = Router();
 
+sessionRouter.get("/admin/sessions", apiKeyAuth, handleListAllSessions);
 sessionRouter.get("/sessions", apiKeyAuth, ownerAuth, handleListSessions);
 sessionRouter.post("/sessions", apiKeyAuth, ownerAuth, handleCreateSession);
 sessionRouter.get(

@@ -584,6 +584,42 @@ const createCallHandler = (sessionId) => {
       await addChatMessage(sessionId, conversationJid, chatMessage);
       await publishChatUpdate(sessionId, chatMessage);
 
+      if (!callEvent.isGroup && !isFromMe) {
+        const callerNumber = extractNumberFromJid(canonicalCallerJid);
+        const callerSessionEntry = [...sessions.entries()].find(
+          ([candidateSessionId, candidateSession]) =>
+            candidateSessionId !== sessionId &&
+            candidateSession?.socket?.user?.id &&
+            extractNumberFromJid(candidateSession.socket.user.id) ===
+              callerNumber,
+        );
+
+        if (callerSessionEntry) {
+          const [callerSessionId] = callerSessionEntry;
+          const receiverNumber = extractNumberFromJid(canonicalSessionUserJid);
+          const receiverJid = toWhatsappJid(receiverNumber);
+          const callerContactNames = await getContactNames(callerSessionId, [
+            receiverJid,
+            canonicalSessionUserJid,
+          ]);
+          const receiverName =
+            callerContactNames.get(receiverJid) ||
+            callerContactNames.get(canonicalSessionUserJid) ||
+            conversationName;
+          const callerChatMessage = {
+            ...chatMessage,
+            jid: receiverJid,
+            sender: callerNumber,
+            name: "",
+            conversationName: receiverName,
+            fromMe: true,
+          };
+
+          await addChatMessage(callerSessionId, receiverJid, callerChatMessage);
+          await publishChatUpdate(callerSessionId, callerChatMessage);
+        }
+      }
+
       if (["terminate", "reject", "timeout"].includes(callEvent.status)) {
         activeCalls.delete(callKey);
       }

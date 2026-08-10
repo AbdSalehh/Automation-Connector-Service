@@ -12,8 +12,37 @@ import {
   createOwnedSession,
   deleteSessionOwnership,
   listOwnedSessionIds,
+  listSessionOwnerships,
 } from "../services/session-ownership.store.js";
 import { sanitizeSessionId } from "../lib/sessionId.js";
+
+const buildSessionSummaries = async (sessionOwnerships, includeOwnerId) => {
+  const sessions = await Promise.all(
+    sessionOwnerships.map(async ({ ownerId, sessionId }) => {
+      if (!getSessionStatus(sessionId)) {
+        await startSession(sessionId);
+      }
+
+      const session = getSessionStatus(sessionId);
+
+      if (!session) {
+        return null;
+      }
+
+      return {
+        ...(includeOwnerId ? { ownerId } : {}),
+        sessionId,
+        status: session.status,
+        isReady: session.isReady,
+        phoneNumber: session.user?.phoneNumber ?? null,
+        name: session.user?.name ?? null,
+        connectedAt: session.user?.connectedAt ?? null,
+      };
+    }),
+  );
+
+  return sessions.filter(Boolean);
+};
 
 export const handleCreateSession = async (request, response) => {
   const sessionId = crypto.randomUUID();
@@ -60,31 +89,29 @@ export const handleGetSessionStatus = async (request, response) => {
  */
 export const handleListSessions = async (request, response) => {
   const ownedSessionIds = await listOwnedSessionIds(request.ownerId);
-  const sessions = await Promise.all(
-    ownedSessionIds.map(async (sessionId) => {
-      if (!getSessionStatus(sessionId)) {
-        await startSession(sessionId);
-      }
-
-      const session = getSessionStatus(sessionId);
-
-      return session
-        ? {
-            sessionId,
-            status: session.status,
-            isReady: session.isReady,
-            phoneNumber: session.user?.phoneNumber ?? null,
-            name: session.user?.name ?? null,
-            connectedAt: session.user?.connectedAt ?? null,
-          }
-        : null;
-    }),
+  const sessions = await buildSessionSummaries(
+    ownedSessionIds.map((sessionId) => ({
+      ownerId: request.ownerId,
+      sessionId,
+    })),
+    false,
   );
 
   return sendSuccess(response, {
     statusCode: 200,
     message: "Daftar sesi berhasil diambil",
-    data: sessions.filter(Boolean),
+    data: sessions,
+  });
+};
+
+export const handleListAllSessions = async (_request, response) => {
+  const sessionOwnerships = await listSessionOwnerships();
+  const sessions = await buildSessionSummaries(sessionOwnerships, true);
+
+  return sendSuccess(response, {
+    statusCode: 200,
+    message: "Daftar seluruh sesi berhasil diambil",
+    data: sessions,
   });
 };
 
