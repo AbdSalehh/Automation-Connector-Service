@@ -66,7 +66,18 @@ export const handleListSessions = async (request, response) => {
         await startSession(sessionId);
       }
 
-      return getSessionStatus(sessionId);
+      const session = getSessionStatus(sessionId);
+
+      return session
+        ? {
+            sessionId,
+            status: session.status,
+            isReady: session.isReady,
+            phoneNumber: session.user?.phoneNumber ?? null,
+            name: session.user?.name ?? null,
+            connectedAt: session.user?.connectedAt ?? null,
+          }
+        : null;
     }),
   );
 
