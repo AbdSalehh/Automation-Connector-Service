@@ -29,6 +29,9 @@ import {
   addChatMessage,
   clearSessionChatCache,
   getContactNames,
+  registerJidAlias,
+  resolveStoredCanonicalJid,
+  upsertContactNames,
 } from "./chat.store.js";
 
 /**
@@ -380,10 +383,31 @@ const createIncomingMessageHandler = (sessionId) => {
       const isMedia = messageType !== "text";
       const replyTo = extractReplyContext(incomingMessage.message);
       const session = sessions.get(sessionId);
-      const conversationJid = resolveCanonicalJid(incomingMessage.key);
+      const resolvedMessageJid = resolveCanonicalJid(incomingMessage.key);
+      const alternatePhoneJid = [
+        incomingMessage.key.remoteJidAlt,
+        incomingMessage.key.senderPn,
+        incomingMessage.key.participantPn,
+      ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
+
+      if (remoteJid.endsWith("@lid") && alternatePhoneJid) {
+        await registerJidAlias(
+          sessionId,
+          remoteJid,
+          alternatePhoneJid,
+          isFromMe ? "" : senderName,
+        );
+      }
+
+      const conversationJid = await resolveStoredCanonicalJid(
+        sessionId,
+        resolvedMessageJid,
+      );
       const conversationName = remoteJid.endsWith("@g.us")
         ? await resolveConversationName(session?.socket, remoteJid)
-        : contactNames.get(remoteJid) || (isFromMe ? "" : senderName);
+        : contactNames.get(conversationJid) ||
+          contactNames.get(remoteJid) ||
+          (isFromMe ? "" : senderName);
 
       /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
       if (!messageText && !isMedia) {
@@ -552,6 +576,36 @@ const MESSAGE_STATUS_LABEL = {
  * untuk mengetahui apakah pesan benar-benar sampai ke penerima atau hanya
  * diterima server, karena `sendMessage` yang sukses belum menjamin pengiriman.
  */
+const createContactHandler = (sessionId) => {
+  return async (contacts) => {
+    await upsertContactNames(
+      sessionId,
+      contacts.map((contact) => ({
+        jid: contact.id,
+        name: contact.name || contact.notify || contact.verifiedName || "",
+      })),
+    );
+
+    for (const contact of contacts) {
+      const phoneJid = [contact.id, contact.phoneNumber, contact.pn].find(
+        (jid) => jid?.endsWith("@s.whatsapp.net"),
+      );
+      const lidJid = [contact.id, contact.lid].find((jid) =>
+        jid?.endsWith("@lid"),
+      );
+
+      if (phoneJid && lidJid) {
+        await registerJidAlias(
+          sessionId,
+          lidJid,
+          phoneJid,
+          contact.name || contact.notify || contact.verifiedName || "",
+        );
+      }
+    }
+  };
+};
+
 const createMessageStatusHandler = (sessionId) => {
   return (updates) => {
     for (const { key, update } of updates) {
@@ -831,6 +885,8 @@ export const startSession = async (sessionId) => {
       createConnectionUpdateHandler(sessionId, socket),
     );
     socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
+    socket.ev.on("contacts.upsert", createContactHandler(sessionId));
+    socket.ev.on("contacts.update", createContactHandler(sessionId));
     socket.ev.on("call", createCallHandler(sessionId));
     socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
 

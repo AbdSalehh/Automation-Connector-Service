@@ -74,8 +74,16 @@ export const resolveCanonicalJid = (messageKey) => {
     return remoteJid;
   }
 
-  const alternatePhoneNumberJid =
-    messageKey?.remoteJidAlt || messageKey?.senderPn || "";
+  const alternatePhoneNumberJid = [
+    messageKey?.remoteJidAlt,
+    messageKey?.senderPn,
+    messageKey?.participantPn,
+  ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
+
+  if (remoteJid.endsWith("@lid") && !alternatePhoneNumberJid) {
+    return remoteJid;
+  }
+
   const phoneNumber = messageKey?.fromMe
     ? extractNumberFromJid(alternatePhoneNumberJid || remoteJid)
     : resolveSenderNumber(messageKey);

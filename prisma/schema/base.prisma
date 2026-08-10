@@ -46,6 +46,19 @@ model WhatsappContact {
   @@index([sessionId, name])
 }
 
+model WhatsappJidAlias {
+  id           String   @id @default(uuid())
+  sessionId    String
+  aliasJid     String
+  canonicalJid String
+  name         String   @default("")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([sessionId, aliasJid])
+  @@index([sessionId, canonicalJid])
+}
+
 model WhatsappMessage {
   id             String               @id @default(uuid())
   whatsappId     String

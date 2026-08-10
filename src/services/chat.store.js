@@ -317,6 +317,86 @@ export const getContactNames = async (sessionId, jids) => {
   return new Map(contacts.map((contact) => [contact.jid, contact.name]));
 };
 
+export const resolveStoredCanonicalJid = async (sessionId, jid) => {
+  if (!jid?.endsWith("@lid")) {
+    return jid;
+  }
+
+  const alias = await prisma.whatsappJidAlias.findUnique({
+    where: { sessionId_aliasJid: { sessionId, aliasJid: jid } },
+  });
+
+  return alias?.canonicalJid || jid;
+};
+
+export const registerJidAlias = async (
+  sessionId,
+  aliasJid,
+  canonicalJid,
+  name = "",
+) => {
+  if (
+    !sessionId ||
+    !aliasJid?.endsWith("@lid") ||
+    !canonicalJid?.endsWith("@s.whatsapp.net")
+  ) {
+    return;
+  }
+
+  await prisma.whatsappJidAlias.upsert({
+    where: { sessionId_aliasJid: { sessionId, aliasJid } },
+    create: { sessionId, aliasJid, canonicalJid, name: name.trim() },
+    update: { canonicalJid, ...(name.trim() ? { name: name.trim() } : {}) },
+  });
+
+  await prisma.$transaction(async (transaction) => {
+    const sourceConversation =
+      await transaction.whatsappConversation.findUnique({
+        where: { sessionId_jid: { sessionId, jid: aliasJid } },
+      });
+
+    if (!sourceConversation) {
+      return;
+    }
+
+    const targetConversation = await transaction.whatsappConversation.upsert({
+      where: { sessionId_jid: { sessionId, jid: canonicalJid } },
+      create: {
+        sessionId,
+        jid: canonicalJid,
+        name: name.trim() || sourceConversation.name,
+        lastMessage: sourceConversation.lastMessage,
+        lastSentAt: sourceConversation.lastSentAt,
+      },
+      update: name.trim() ? { name: name.trim() } : {},
+    });
+
+    await transaction.whatsappMessage.updateMany({
+      where: { conversationId: sourceConversation.id },
+      data: { conversationId: targetConversation.id, jid: canonicalJid },
+    });
+
+    const latestMessage = await transaction.whatsappMessage.findFirst({
+      where: { conversationId: targetConversation.id },
+      orderBy: [{ sentAt: "desc" }, { id: "desc" }],
+    });
+
+    if (latestMessage) {
+      await transaction.whatsappConversation.update({
+        where: { id: targetConversation.id },
+        data: {
+          lastMessage: serializeMessage(latestMessage),
+          lastSentAt: latestMessage.sentAt,
+        },
+      });
+    }
+
+    await transaction.whatsappConversation.delete({
+      where: { id: sourceConversation.id },
+    });
+  });
+};
+
 export const listConversations = async (sessionId, { limit, offset }) => {
   const activeSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const where = {
