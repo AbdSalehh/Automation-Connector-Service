@@ -13,6 +13,7 @@ import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import {
   extractNumberFromJid,
+  resolveCanonicalJid,
   resolveSenderNumber,
   toWhatsappJid,
 } from "../lib/phoneNumber.js";
@@ -350,6 +351,7 @@ const createIncomingMessageHandler = (sessionId) => {
       const isMedia = messageType !== "text";
       const replyTo = extractReplyContext(incomingMessage.message);
       const session = sessions.get(sessionId);
+      const conversationJid = resolveCanonicalJid(incomingMessage.key);
       const conversationName = isFromMe
         ? ""
         : remoteJid.endsWith("@g.us")
@@ -390,7 +392,7 @@ const createIncomingMessageHandler = (sessionId) => {
 
       const chatMessage = {
         id: incomingMessage.key.id,
-        jid: remoteJid,
+        jid: conversationJid,
         sender,
         message: messageText,
         name: senderName,
@@ -403,7 +405,7 @@ const createIncomingMessageHandler = (sessionId) => {
         receivedAt: new Date().toISOString(),
       };
 
-      await addChatMessage(sessionId, remoteJid, chatMessage);
+      await addChatMessage(sessionId, conversationJid, chatMessage);
 
       await publishChatUpdate(sessionId, chatMessage);
 
@@ -436,11 +438,15 @@ const createCallHandler = (sessionId) => {
     const session = sessions.get(sessionId);
 
     for (const callEvent of callEvents || []) {
-      const conversationJid = callEvent.groupJid || callEvent.chatId;
+      const rawConversationJid = callEvent.groupJid || callEvent.chatId;
 
-      if (!conversationJid || !callEvent.id) {
+      if (!rawConversationJid || !callEvent.id) {
         continue;
       }
+
+      const conversationJid = callEvent.isGroup
+        ? rawConversationJid
+        : resolveCanonicalJid({ remoteJid: rawConversationJid });
 
       const callKey = `${sessionId}:${callEvent.id}`;
       const previousCall = activeCalls.get(callKey) || {};
@@ -587,6 +593,7 @@ const createHistoryMessageHandler = (sessionId) => {
         contactNames.get(remoteJid) || historyMessage.pushName || "";
       const conversationName = contactNames.get(remoteJid) || "";
       const replyTo = extractReplyContext(historyMessage.message);
+      const conversationJid = resolveCanonicalJid(historyMessage.key);
 
       if (!messageText && messageType === "text") {
         return;
@@ -594,7 +601,7 @@ const createHistoryMessageHandler = (sessionId) => {
 
       const wasStored = await addChatMessage(
         sessionId,
-        remoteJid,
+        conversationJid,
         {
           id: historyMessage.key.id,
           sender,
@@ -612,7 +619,7 @@ const createHistoryMessageHandler = (sessionId) => {
       );
 
       if (wasStored) {
-        affectedConversationJids.add(remoteJid);
+        affectedConversationJids.add(conversationJid);
         storedMessageCount += 1;
       }
     };
@@ -763,7 +770,7 @@ const createConnectionUpdateHandler = (sessionId, ownerSocket) => {
         "Koneksi WhatsApp tersambung",
       );
 
-      await logoutDuplicateSessions(sessionId, session.phoneNumber);
+      await detectDuplicateSessions(sessionId, session.phoneNumber);
 
       await publishSessionUpdate(sessionId, getSessionStatus(sessionId));
     }
@@ -822,31 +829,82 @@ const removeSessionAuthFolder = (sessionId) => {
 };
 
 /**
- * Melakukan logout pada sesi lama yang ternyata memakai nomor WhatsApp
- * yang sama dengan sesi yang baru saja tersambung. Tujuannya agar satu
- * nomor WhatsApp hanya aktif pada satu sesi (scan terbaru yang menang).
+ * Mendeteksi sesi lain yang sudah memakai nomor WhatsApp yang sama. Alih-alih
+ * langsung logout sesi lama, sesi baru ditandai `pendingDuplicate` sehingga
+ * frontend dapat meminta konfirmasi apakah ingin melanjutkan (logout sesi lama)
+ * atau membatalkan.
  */
-const logoutDuplicateSessions = async (currentSessionId, phoneNumber) => {
+const detectDuplicateSessions = async (currentSessionId, phoneNumber) => {
   if (!phoneNumber) {
     return;
   }
+
+  const conflictingSessionIds = [];
 
   for (const [otherSessionId, otherSession] of sessions.entries()) {
     if (otherSessionId === currentSessionId) {
       continue;
     }
 
-    if (otherSession.phoneNumber !== phoneNumber) {
-      continue;
+    if (otherSession.phoneNumber === phoneNumber) {
+      conflictingSessionIds.push(otherSessionId);
     }
+  }
 
-    logger.warn(
-      { currentSessionId, otherSessionId, phoneNumber },
-      "Nomor WhatsApp sama terdeteksi di sesi lain, melakukan logout sesi lama",
-    );
+  if (conflictingSessionIds.length === 0) {
+    return;
+  }
 
+  const session = sessions.get(currentSessionId);
+
+  if (session) {
+    session.pendingDuplicate = { phoneNumber, conflictingSessionIds };
+  }
+
+  logger.warn(
+    { currentSessionId, conflictingSessionIds, phoneNumber },
+    "Nomor WhatsApp sama terdeteksi, menunggu konfirmasi pengguna",
+  );
+};
+
+/**
+ * Melanjutkan sesi yang menunggu konfirmasi duplikat: logout seluruh sesi lama
+ * dengan nomor yang sama lalu membersihkan status pending.
+ */
+export const confirmDuplicateSession = async (sessionId) => {
+  const session = sessions.get(sessionId);
+
+  if (!session?.pendingDuplicate) {
+    return false;
+  }
+
+  const { conflictingSessionIds } = session.pendingDuplicate;
+
+  for (const otherSessionId of conflictingSessionIds) {
     await deleteSession(otherSessionId);
   }
+
+  session.pendingDuplicate = null;
+
+  await publishSessionUpdate(sessionId, getSessionStatus(sessionId));
+
+  return true;
+};
+
+/**
+ * Membatalkan sesi yang menunggu konfirmasi duplikat: sesi baru dihapus dan
+ * sesi lama dengan nomor yang sama tetap aktif.
+ */
+export const cancelDuplicateSession = async (sessionId) => {
+  const session = sessions.get(sessionId);
+
+  if (!session?.pendingDuplicate) {
+    return false;
+  }
+
+  await deleteSession(sessionId);
+
+  return true;
 };
 
 /**
@@ -922,6 +980,12 @@ export const getSessionStatus = (sessionId) => {
     status: session.status,
     isReady: session.status === "open",
     qr: session.status === "open" ? null : session.qrDataUrl,
+    pendingDuplicate: session.pendingDuplicate
+      ? {
+          phoneNumber: session.pendingDuplicate.phoneNumber,
+          conflictingSessionIds: session.pendingDuplicate.conflictingSessionIds,
+        }
+      : null,
     user:
       session.status === "open"
         ? {

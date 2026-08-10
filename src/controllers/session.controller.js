@@ -4,6 +4,8 @@ import {
   startSession,
   getAllSessions,
   deleteSession,
+  confirmDuplicateSession,
+  cancelDuplicateSession,
 } from "../services/session.manager.js";
 import { sanitizeSessionId } from "../lib/sessionId.js";
 
@@ -67,6 +69,66 @@ export const handleDeleteSession = async (req, res) => {
   return sendSuccess(res, {
     statusCode: 200,
     message: "Sesi berhasil dihapus dan dilogout",
+    data: null,
+  });
+};
+
+/**
+ * Controller untuk melanjutkan sesi yang menunggu konfirmasi konflik nomor.
+ * Sesi lama dengan nomor yang sama akan di-logout.
+ */
+export const handleConfirmDuplicateSession = async (req, res) => {
+  const sessionId = sanitizeSessionId(req.params.sessionId);
+
+  if (!sessionId) {
+    return sendError(res, {
+      statusCode: 400,
+      message: "Format sessionId tidak valid",
+    });
+  }
+
+  const confirmed = await confirmDuplicateSession(sessionId);
+
+  if (!confirmed) {
+    return sendError(res, {
+      statusCode: 409,
+      message: "Tidak ada konflik nomor yang menunggu konfirmasi",
+    });
+  }
+
+  return sendSuccess(res, {
+    statusCode: 200,
+    message: "Sesi lama dilogout, sesi baru dilanjutkan",
+    data: getSessionStatus(sessionId),
+  });
+};
+
+/**
+ * Controller untuk membatalkan sesi yang menunggu konfirmasi konflik nomor.
+ * Sesi baru dihapus dan sesi lama tetap aktif.
+ */
+export const handleCancelDuplicateSession = async (req, res) => {
+  const sessionId = sanitizeSessionId(req.params.sessionId);
+
+  if (!sessionId) {
+    return sendError(res, {
+      statusCode: 400,
+      message: "Format sessionId tidak valid",
+    });
+  }
+
+  const cancelled = await cancelDuplicateSession(sessionId);
+
+  if (!cancelled) {
+    return sendError(res, {
+      statusCode: 409,
+      message: "Tidak ada konflik nomor yang menunggu konfirmasi",
+    });
+  }
+
+  return sendSuccess(res, {
+    statusCode: 200,
+    message: "Sesi baru dibatalkan, sesi lama tetap aktif",
     data: null,
   });
 };

@@ -58,3 +58,29 @@ export const resolveSenderNumber = (messageKey) => {
 
   return "";
 };
+
+/**
+ * Mengembalikan JID kanonik untuk sebuah percakapan pribadi agar satu kontak
+ * yang sama tidak terpecah menjadi beberapa percakapan. WhatsApp dapat memakai
+ * `<lid>@lid`, `<nomor>@s.whatsapp.net`, atau varian lain untuk kontak yang
+ * sama. Bila nomor asli dapat diresolusi, seluruhnya dipetakan ke bentuk
+ * `<nomor>@s.whatsapp.net`. Grup (`@g.us`) dan JID tanpa nomor dikembalikan
+ * apa adanya.
+ */
+export const resolveCanonicalJid = (messageKey) => {
+  const remoteJid = messageKey?.remoteJid ?? "";
+
+  if (remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") {
+    return remoteJid;
+  }
+
+  const phoneNumber = messageKey?.fromMe
+    ? extractNumberFromJid(remoteJid)
+    : resolveSenderNumber(messageKey);
+
+  if (phoneNumber) {
+    return toWhatsappJid(phoneNumber);
+  }
+
+  return remoteJid;
+};
