@@ -28,11 +28,7 @@ import { uploadInboundMedia } from "./media.service.js";
 import {
   addChatMessage,
   clearSessionChatCache,
-  finalizeHistoryBatch,
   getContactNames,
-  seedConversation,
-  updateConversationName,
-  upsertContactNames,
 } from "./chat.store.js";
 
 /**
@@ -536,186 +532,6 @@ const createCallHandler = (sessionId) => {
   };
 };
 
-const createHistoryMessageHandler = (sessionId) => {
-  return async ({ chats, contacts, messages, syncType, progress }) => {
-    const session = sessions.get(sessionId);
-    const contactNames = new Map();
-    const affectedConversationJids = new Set();
-    let storedMessageCount = 0;
-
-    logger.info(
-      {
-        sessionId,
-        syncType,
-        progress,
-        chatCount: chats?.length || 0,
-        contactCount: contacts?.length || 0,
-        messageCount: messages?.length || 0,
-      },
-      "Menerima batch history WhatsApp",
-    );
-
-    for (const contact of contacts || []) {
-      const contactName =
-        contact.name || contact.notify || contact.verifiedName || "";
-
-      for (const contactJid of [contact.id, contact.jid, contact.lid]) {
-        if (contactJid && contactName) {
-          contactNames.set(contactJid, contactName);
-        }
-      }
-    }
-
-    for (const chat of chats || []) {
-      const chatName = chat.name || chat.displayName || "";
-
-      if (chat.id && chatName && !contactNames.has(chat.id)) {
-        contactNames.set(chat.id, chatName);
-      }
-    }
-
-    await upsertContactNames(
-      sessionId,
-      Array.from(contactNames.entries()).map(([contactJid, contactName]) => ({
-        jid: contactJid,
-        name: contactName,
-      })),
-    );
-
-    /**
-     * Seed conversation dari daftar chat WhatsApp. Daftar ini mencerminkan
-     * seluruh percakapan di ponsel, sehingga tidak hanya chat yang kebetulan
-     * memiliki pesan history yang muncul di daftar.
-     */
-    for (const chat of chats || []) {
-      const chatJid = chat.id || "";
-
-      if (!chatJid || chatJid === "status@broadcast") {
-        continue;
-      }
-
-      const latestHistoryMessage = chat.messages?.[chat.messages.length - 1];
-      const latestMessageText = latestHistoryMessage?.message?.message
-        ? extractMessageText(latestHistoryMessage.message.message)
-        : "";
-
-      const lastMessage = latestMessageText
-        ? { message: latestMessageText, messageType: "text" }
-        : null;
-
-      await seedConversation(sessionId, {
-        jid: chatJid,
-        name: contactNames.get(chatJid) || "",
-        lastSentAt: convertUnixToIso(chat.conversationTimestamp),
-        lastMessage,
-      });
-
-      affectedConversationJids.add(chatJid);
-    }
-
-    /**
-     * Menyimpan satu pesan history. Sumbernya bisa dari array `messages[]`
-     * top-level maupun dari `chats[].messages` yang menempel pada tiap chat.
-     */
-    const storeHistoryMessage = async (historyMessage) => {
-      const remoteJid = historyMessage.key?.remoteJid || "";
-
-      if (!historyMessage.message || remoteJid === "status@broadcast") {
-        return;
-      }
-
-      const messageContent = unwrapMessage(historyMessage.message);
-      const messageType = detectMessageType(messageContent);
-      const messageText = extractMessageText(historyMessage.message);
-      const mentionJids = extractMentionJids(historyMessage.message);
-      const senderJid =
-        historyMessage.key.participant ||
-        historyMessage.key.participantPn ||
-        remoteJid;
-      const sender = historyMessage.key.fromMe
-        ? extractNumberFromJid(remoteJid)
-        : resolveSenderNumber(historyMessage.key);
-      const contactName =
-        contactNames.get(senderJid) ||
-        historyMessage.pushName ||
-        contactNames.get(remoteJid) ||
-        "";
-      const mentions = resolveMentions(mentionJids, contactNames);
-      const conversationName = remoteJid.endsWith("@g.us")
-        ? await resolveConversationName(
-            session?.socket,
-            remoteJid,
-            contactNames,
-          )
-        : contactNames.get(remoteJid) || "";
-      const replyTo = extractReplyContext(historyMessage.message);
-      const conversationJid = resolveCanonicalJid(historyMessage.key);
-
-      if (!messageText && messageType === "text") {
-        return;
-      }
-
-      const wasStored = await addChatMessage(
-        sessionId,
-        conversationJid,
-        {
-          id: historyMessage.key.id,
-          sender,
-          message: messageText,
-          name: contactName,
-          conversationName,
-          messageType,
-          media: null,
-          replyTo,
-          mentions,
-          fromMe: Boolean(historyMessage.key.fromMe),
-          sentAt: convertUnixToIso(historyMessage.messageTimestamp),
-          receivedAt: null,
-        },
-        { deferRetention: true },
-      );
-
-      if (wasStored) {
-        affectedConversationJids.add(conversationJid);
-        storedMessageCount += 1;
-      }
-    };
-
-    for (const historyMessage of messages || []) {
-      await storeHistoryMessage(historyMessage);
-    }
-
-    /**
-     * Pesan history juga menempel pada tiap chat. Simpan agar riwayat per
-     * percakapan tetap terisi walaupun array `messages[]` top-level kosong.
-     */
-    for (const chat of chats || []) {
-      for (const embeddedMessage of chat.messages || []) {
-        if (embeddedMessage?.message) {
-          await storeHistoryMessage(embeddedMessage.message);
-        }
-      }
-    }
-
-    await finalizeHistoryBatch(sessionId, Array.from(affectedConversationJids));
-
-    for (const [contactJid, contactName] of contactNames.entries()) {
-      await updateConversationName(sessionId, contactJid, contactName);
-    }
-
-    logger.info(
-      {
-        sessionId,
-        syncType,
-        progress,
-        storedMessageCount,
-        affectedConversationCount: affectedConversationJids.size,
-      },
-      "Batch history WhatsApp selesai disimpan",
-    );
-  };
-};
-
 /**
  * Memetakan kode status pesan Baileys menjadi label yang mudah dibaca.
  * Status 2 (server ack/centang satu) berarti pesan baru sampai server WhatsApp,
@@ -1016,10 +832,6 @@ export const startSession = async (sessionId) => {
     );
     socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
     socket.ev.on("call", createCallHandler(sessionId));
-    socket.ev.on(
-      "messaging-history.set",
-      createHistoryMessageHandler(sessionId),
-    );
     socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
 
     return socket;

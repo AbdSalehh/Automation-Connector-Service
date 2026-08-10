@@ -74,8 +74,10 @@ export const resolveCanonicalJid = (messageKey) => {
     return remoteJid;
   }
 
+  const alternatePhoneNumberJid =
+    messageKey?.remoteJidAlt || messageKey?.senderPn || "";
   const phoneNumber = messageKey?.fromMe
-    ? extractNumberFromJid(remoteJid)
+    ? extractNumberFromJid(alternatePhoneNumberJid || remoteJid)
     : resolveSenderNumber(messageKey);
 
   if (phoneNumber) {
