@@ -31,6 +31,56 @@ const ensureCloudinaryReady = () => {
   return true;
 };
 
+const resolveUploadOptions = (messageType, fileName) => {
+  const baseOptions = {
+    folder: "whatsapp-inbound",
+    use_filename: Boolean(fileName),
+    filename_override: fileName || undefined,
+  };
+
+  if (messageType === "image" || messageType === "sticker") {
+    return {
+      ...baseOptions,
+      resource_type: "image",
+      format: "webp",
+      transformation: [{ quality: "auto:eco", fetch_format: "webp" }],
+      outputMimetype: "image/webp",
+      outputFileName: fileName
+        ? `${fileName.replace(/\.[^.]+$/, "")}.webp`
+        : "image.webp",
+    };
+  }
+
+  if (messageType === "video") {
+    return {
+      ...baseOptions,
+      resource_type: "video",
+      format: "mp4",
+      transformation: [
+        {
+          width: 1280,
+          height: 1280,
+          crop: "limit",
+          quality: "auto:eco",
+          video_codec: "h264",
+          audio_codec: "aac",
+        },
+      ],
+      outputMimetype: "video/mp4",
+      outputFileName: fileName
+        ? `${fileName.replace(/\.[^.]+$/, "")}.mp4`
+        : "video.mp4",
+    };
+  }
+
+  return {
+    ...baseOptions,
+    resource_type: messageType === "audio" ? "video" : "raw",
+    outputMimetype: null,
+    outputFileName: fileName,
+  };
+};
+
 /**
  * Mengunggah buffer media masuk ke Cloudinary lalu mengembalikan URL HTTPS
  * (CDN). Bersifat best-effort: bila Cloudinary belum dikonfigurasi atau upload
@@ -39,7 +89,7 @@ const ensureCloudinaryReady = () => {
  */
 export const uploadInboundMedia = async (
   buffer,
-  { mimetype, fileName, resourceType, sessionId },
+  { mimetype, fileName, messageType, sessionId },
 ) => {
   if (!ensureCloudinaryReady()) {
     logger.warn(
@@ -51,14 +101,11 @@ export const uploadInboundMedia = async (
   }
 
   try {
+    const { outputMimetype, outputFileName, ...cloudinaryUploadOptions } =
+      resolveUploadOptions(messageType, fileName);
     const uploadResult = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
-        {
-          resource_type: resourceType,
-          folder: "whatsapp-inbound",
-          use_filename: Boolean(fileName),
-          filename_override: fileName || undefined,
-        },
+        cloudinaryUploadOptions,
         (error, result) => {
           if (error) {
             reject(error);
@@ -73,14 +120,19 @@ export const uploadInboundMedia = async (
     });
 
     logger.info(
-      { sessionId, bytes: uploadResult.bytes },
-      "Media masuk berhasil diunggah ke Cloudinary",
+      {
+        sessionId,
+        messageType,
+        inputBytes: buffer.length,
+        outputBytes: uploadResult.bytes,
+      },
+      "Media masuk berhasil dioptimalkan dan diunggah ke Cloudinary",
     );
 
     return {
       url: uploadResult.secure_url,
-      mimetype,
-      fileName,
+      mimetype: outputMimetype || mimetype,
+      fileName: outputFileName,
       fileLength: uploadResult.bytes,
     };
   } catch (error) {

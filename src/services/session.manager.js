@@ -254,7 +254,7 @@ const downloadAndUploadMedia = async (
     return await uploadInboundMedia(buffer, {
       mimetype: mediaInfo.mimetype,
       fileName: mediaInfo.fileName,
-      resourceType: mediaInfo.resourceType,
+      messageType,
       sessionId,
     });
   } catch (error) {

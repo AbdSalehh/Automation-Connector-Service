@@ -17,6 +17,9 @@ const parsePositiveInteger = (value, fallback, maximum) => {
   return Math.min(parsedValue, maximum);
 };
 
+const isValidConversationJid = (jid) =>
+  ["@s.whatsapp.net", "@lid", "@g.us"].some((suffix) => jid.endsWith(suffix));
+
 const validateSession = (request, response) => {
   const sessionId = sanitizeSessionId(request.params.sessionId);
 
@@ -69,7 +72,7 @@ export const handleListConversationMessages = async (request, response) => {
 
   const jid = decodeURIComponent(request.params.jid || "").trim();
 
-  if (!jid || (!jid.endsWith("@s.whatsapp.net") && !jid.endsWith("@lid"))) {
+  if (!jid || !isValidConversationJid(jid)) {
     return sendError(response, {
       statusCode: 400,
       message: "Format JID percakapan tidak valid",
@@ -99,6 +102,14 @@ export const handleClearConversationCache = async (request, response) => {
   }
 
   const jid = decodeURIComponent(request.params.jid || "").trim();
+
+  if (!jid || !isValidConversationJid(jid)) {
+    return sendError(response, {
+      statusCode: 400,
+      message: "Format JID percakapan tidak valid",
+    });
+  }
+
   const wasDeleted = await clearConversationCache(sessionId, jid);
 
   return sendSuccess(response, {
