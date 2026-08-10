@@ -38,6 +38,8 @@ export const forwardInboundMessage = async ({
   sender,
   message,
   name,
+  messageType,
+  media,
   sentAt,
   receivedAt,
 }) => {
@@ -51,6 +53,8 @@ export const forwardInboundMessage = async ({
     sender,
     message,
     name,
+    messageType,
+    media,
     sentAt,
     receivedAt,
   };

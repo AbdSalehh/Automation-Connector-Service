@@ -47,6 +47,14 @@ export const detectMessageType = (messageContent) => {
     return "sticker";
   }
 
+  if (messageContent.locationMessage || messageContent.liveLocationMessage) {
+    return "location";
+  }
+
+  if (messageContent.contactMessage || messageContent.contactsArrayMessage) {
+    return "contact";
+  }
+
   return "text";
 };
 

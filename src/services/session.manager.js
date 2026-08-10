@@ -235,6 +235,56 @@ const extractMessageText = (rawMessageContent) => {
   );
 };
 
+const extractSharedMessageData = (messageContent, messageType) => {
+  if (messageType === "location") {
+    const location =
+      messageContent.locationMessage || messageContent.liveLocationMessage;
+
+    if (!location) {
+      return null;
+    }
+
+    const latitude = Number(location.degreesLatitude);
+    const longitude = Number(location.degreesLongitude);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return null;
+    }
+
+    return {
+      latitude,
+      longitude,
+      name: location.name || "",
+      address: location.address || "",
+      url: `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`,
+    };
+  }
+
+  if (messageType === "contact") {
+    const contact = messageContent.contactMessage;
+    const contacts = messageContent.contactsArrayMessage?.contacts || [];
+    const primaryContact = contact || contacts[0];
+    const vcard = primaryContact?.vcard || "";
+    const phoneNumber =
+      vcard.match(/(?:TEL[^:]*:)([^\r\n]+)/i)?.[1]?.trim() || "";
+
+    if (!primaryContact) {
+      return null;
+    }
+
+    return {
+      displayName:
+        primaryContact.displayName ||
+        messageContent.contactsArrayMessage?.displayName ||
+        "Kontak WhatsApp",
+      phoneNumber,
+      contactCount: contact ? 1 : contacts.length,
+    };
+  }
+
+  return null;
+};
+
 /**
  * Mengunduh byte media dari sebuah pesan lalu mengunggahnya ke Cloudinary.
  * Ukuran dicek lebih dulu agar berkas melebihi batas tidak ikut diunduh,
@@ -416,7 +466,17 @@ const createIncomingMessageHandler = (sessionId) => {
       const mentions = resolveMentions(mentionJids, contactNames);
 
       const messageType = detectMessageType(messageContent);
-      const isMedia = messageType !== "text";
+      const isDownloadableMedia = [
+        "image",
+        "video",
+        "audio",
+        "document",
+        "sticker",
+      ].includes(messageType);
+      const sharedMessageData = extractSharedMessageData(
+        messageContent,
+        messageType,
+      );
       const replyTo = extractReplyContext(incomingMessage.message);
       const session = sessions.get(sessionId);
       const resolvedMessageJid = resolveCanonicalJid(incomingMessage.key);
@@ -446,7 +506,7 @@ const createIncomingMessageHandler = (sessionId) => {
           (isFromMe ? "" : senderName);
 
       /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
-      if (!messageText && !isMedia) {
+      if (!messageText && !isDownloadableMedia && !sharedMessageData) {
         continue;
       }
 
@@ -468,14 +528,14 @@ const createIncomingMessageHandler = (sessionId) => {
         "Pesan WhatsApp diterima",
       );
 
-      const media = isMedia
+      const media = isDownloadableMedia
         ? await downloadAndUploadMedia(
             incomingMessage,
             messageContent,
             messageType,
             sessionId,
           )
-        : null;
+        : sharedMessageData;
 
       const chatMessage = {
         id: incomingMessage.key.id,
