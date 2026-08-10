@@ -261,24 +261,32 @@ const extractSharedMessageData = (messageContent, messageType) => {
   }
 
   if (messageType === "contact") {
-    const contact = messageContent.contactMessage;
-    const contacts = messageContent.contactsArrayMessage?.contacts || [];
-    const primaryContact = contact || contacts[0];
-    const vcard = primaryContact?.vcard || "";
-    const phoneNumber =
-      vcard.match(/(?:TEL[^:]*:)([^\r\n]+)/i)?.[1]?.trim() || "";
+    const singleContact = messageContent.contactMessage;
+    const contactEntries = singleContact
+      ? [singleContact]
+      : messageContent.contactsArrayMessage?.contacts || [];
+    const contacts = contactEntries
+      .map((contactEntry) => {
+        const vcard = contactEntry?.vcard || "";
+        const phoneNumber =
+          vcard.match(/(?:TEL[^:]*:)([^\r\n]+)/i)?.[1]?.trim() || "";
 
-    if (!primaryContact) {
+        return {
+          displayName: contactEntry?.displayName || "Kontak WhatsApp",
+          phoneNumber,
+        };
+      })
+      .filter(
+        (contactEntry) => contactEntry.displayName || contactEntry.phoneNumber,
+      );
+
+    if (contacts.length === 0) {
       return null;
     }
 
     return {
-      displayName:
-        primaryContact.displayName ||
-        messageContent.contactsArrayMessage?.displayName ||
-        "Kontak WhatsApp",
-      phoneNumber,
-      contactCount: contact ? 1 : contacts.length,
+      contacts,
+      contactCount: contacts.length,
     };
   }
 
