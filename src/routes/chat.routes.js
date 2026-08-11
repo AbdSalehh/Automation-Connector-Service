@@ -7,6 +7,12 @@ import {
   handleListConversationMessages,
   handleListConversations,
 } from "../controllers/chat.controller.js";
+import {
+  handleListStories,
+  handleMarkStoryViewed,
+} from "../controllers/story.controller.js";
+import { cleanupExpiredInboundMedia } from "../services/media.service.js";
+import { sendSuccess } from "../lib/apiResponse.js";
 
 const chatRouter = Router();
 
@@ -30,6 +36,32 @@ chatRouter.delete(
   ownerAuth,
   requireOwnedSession,
   handleClearConversationCache,
+);
+chatRouter.get(
+  "/sessions/:sessionId/stories",
+  apiKeyAuth,
+  ownerAuth,
+  requireOwnedSession,
+  handleListStories,
+);
+chatRouter.post(
+  "/sessions/:sessionId/stories/:storyId/view",
+  apiKeyAuth,
+  ownerAuth,
+  requireOwnedSession,
+  handleMarkStoryViewed,
+);
+chatRouter.post(
+  "/maintenance/media/cleanup",
+  apiKeyAuth,
+  async (request, response) => {
+    const result = await cleanupExpiredInboundMedia();
+
+    return sendSuccess(response, {
+      message: "Cleanup media Cloudinary selesai",
+      data: result,
+    });
+  },
 );
 
 export { chatRouter };

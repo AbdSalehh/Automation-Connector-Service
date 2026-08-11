@@ -33,6 +33,7 @@ import {
   resolveStoredCanonicalJid,
   upsertContactNames,
 } from "./chat.store.js";
+import { upsertStory } from "./story.store.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -453,6 +454,62 @@ const createIncomingMessageHandler = (sessionId) => {
       const remoteJid = incomingMessage.key.remoteJid || "";
 
       if (remoteJid === "status@broadcast") {
+        const messageContent = unwrapMessage(incomingMessage.message);
+        const messageType = detectMessageType(messageContent);
+        const messageText = extractMessageText(incomingMessage.message);
+        const senderJid =
+          incomingMessage.key.participantPn ||
+          incomingMessage.key.participant ||
+          incomingMessage.key.remoteJidAlt ||
+          "";
+
+        if (!incomingMessage.key.id || !senderJid) {
+          continue;
+        }
+
+        const isDownloadableMedia = [
+          "image",
+          "video",
+          "audio",
+          "document",
+          "sticker",
+        ].includes(messageType);
+        const sharedMessageData = extractSharedMessageData(
+          messageContent,
+          messageType,
+        );
+
+        if (!messageText && !isDownloadableMedia && !sharedMessageData) {
+          continue;
+        }
+
+        const contactNames = await getContactNames(sessionId, [senderJid]);
+        const senderName =
+          contactNames.get(senderJid) || incomingMessage.pushName || "";
+        const media = isDownloadableMedia
+          ? await downloadAndUploadMedia(
+              incomingMessage,
+              messageContent,
+              messageType,
+              sessionId,
+            )
+          : sharedMessageData;
+        const sentAt = new Date(
+          convertUnixToIso(incomingMessage.messageTimestamp),
+        );
+
+        await upsertStory(sessionId, {
+          whatsappId: incomingMessage.key.id,
+          senderJid,
+          senderName,
+          messageType,
+          message: messageText,
+          media,
+          fromMe: Boolean(incomingMessage.key.fromMe),
+          sentAt,
+          expiresAt: new Date(sentAt.getTime() + 24 * 60 * 60 * 1000),
+        });
+
         continue;
       }
 

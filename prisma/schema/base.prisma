@@ -83,3 +83,24 @@ model WhatsappMessage {
   @@index([sessionId, jid, sentAt(sort: Desc)])
   @@index([sentAt])
 }
+
+model WhatsappStory {
+  id          String    @id @default(uuid())
+  whatsappId  String
+  sessionId   String
+  senderJid   String
+  senderName  String    @default("")
+  messageType String    @default("text")
+  message     String    @default("")
+  media       Json?
+  fromMe      Boolean   @default(false)
+  sentAt      DateTime
+  expiresAt   DateTime
+  viewedAt    DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([sessionId, whatsappId])
+  @@index([sessionId, expiresAt, sentAt(sort: Desc)])
+  @@index([expiresAt])
+}
