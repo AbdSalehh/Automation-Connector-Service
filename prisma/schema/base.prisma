@@ -99,8 +99,23 @@ model WhatsappStory {
   viewedAt    DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  engagements WhatsappStoryEngagement[]
 
   @@unique([sessionId, whatsappId])
   @@index([sessionId, expiresAt, sentAt(sort: Desc)])
   @@index([expiresAt])
+}
+
+model WhatsappStoryEngagement {
+  id        String    @id @default(uuid())
+  storyId   String
+  actorJid  String
+  actorName String    @default("")
+  viewedAt  DateTime?
+  likedAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  story     WhatsappStory @relation(fields: [storyId], references: [id], onDelete: Cascade)
+
+  @@unique([storyId, actorJid])
 }

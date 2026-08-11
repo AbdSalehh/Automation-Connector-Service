@@ -33,7 +33,11 @@ import {
   resolveStoredCanonicalJid,
   upsertContactNames,
 } from "./chat.store.js";
-import { upsertStory } from "./story.store.js";
+import {
+  recordStoryReaction,
+  recordStoryView,
+  upsertStory,
+} from "./story.store.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -1200,6 +1204,11 @@ export const startSession = async (sessionId) => {
     socket.ev.on("contacts.update", createContactHandler(sessionId));
     socket.ev.on("call", createCallHandler(sessionId));
     socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
+    socket.ev.on(
+      "message-receipt.update",
+      createStoryReceiptHandler(sessionId),
+    );
+    socket.ev.on("messages.reaction", createStoryReactionHandler(sessionId));
 
     return socket;
   } finally {
