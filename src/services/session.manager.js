@@ -77,11 +77,20 @@ const getSessionIdentityJids = (session) =>
     [
       session?.socket?.user?.id,
       session?.socket?.user?.lid,
+      session?.phoneNumber ? toWhatsappJid(session.phoneNumber) : "",
       ...(session?.identityJids || []),
     ]
       .map(normalizeIdentityJid)
       .filter(Boolean),
   );
+
+const isSessionIdentityJid = (session, jid) => {
+  const normalizedJid = normalizeIdentityJid(jid);
+
+  return Boolean(
+    normalizedJid && getSessionIdentityJids(session).has(normalizedJid),
+  );
+};
 
 const findConnectedSessionByJids = (candidateJids, excludedSessionId) => {
   const normalizedCandidates = new Set(
@@ -487,14 +496,29 @@ const createIncomingMessageHandler = (sessionId) => {
       );
       const replyTo = extractReplyContext(incomingMessage.message);
       const session = sessions.get(sessionId);
-      const resolvedMessageJid = resolveCanonicalJid(incomingMessage.key);
+      const sessionUserJid = session?.phoneNumber
+        ? toWhatsappJid(session.phoneNumber)
+        : "";
+      const messageIdentityJids = [remoteJid, incomingMessage.key.remoteJidAlt];
+      const isSelfConversation =
+        !remoteJid.endsWith("@g.us") &&
+        messageIdentityJids.some((identityJid) =>
+          isSessionIdentityJid(session, identityJid),
+        );
+      const resolvedMessageJid = isSelfConversation
+        ? sessionUserJid
+        : resolveCanonicalJid(incomingMessage.key);
       const alternatePhoneJid = [
         incomingMessage.key.remoteJidAlt,
         incomingMessage.key.senderPn,
         incomingMessage.key.participantPn,
       ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
 
-      if (remoteJid.endsWith("@lid") && alternatePhoneJid) {
+      if (
+        !isSelfConversation &&
+        remoteJid.endsWith("@lid") &&
+        alternatePhoneJid
+      ) {
         await registerJidAlias(
           sessionId,
           remoteJid,
@@ -503,15 +527,16 @@ const createIncomingMessageHandler = (sessionId) => {
         );
       }
 
-      const conversationJid = await resolveStoredCanonicalJid(
-        sessionId,
-        resolvedMessageJid,
-      );
-      const conversationName = remoteJid.endsWith("@g.us")
-        ? await resolveConversationName(session?.socket, remoteJid)
-        : contactNames.get(conversationJid) ||
-          contactNames.get(remoteJid) ||
-          (isFromMe ? "" : senderName);
+      const conversationJid = isSelfConversation
+        ? sessionUserJid
+        : await resolveStoredCanonicalJid(sessionId, resolvedMessageJid);
+      const conversationName = isSelfConversation
+        ? session?.name || ""
+        : remoteJid.endsWith("@g.us")
+          ? await resolveConversationName(session?.socket, remoteJid)
+          : contactNames.get(conversationJid) ||
+            contactNames.get(remoteJid) ||
+            (isFromMe ? "" : senderName);
 
       /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
       if (!messageText && !isDownloadableMedia && !sharedMessageData) {
@@ -548,9 +573,9 @@ const createIncomingMessageHandler = (sessionId) => {
       const chatMessage = {
         id: incomingMessage.key.id,
         jid: conversationJid,
-        sender,
+        sender: isSelfConversation ? session?.phoneNumber || sender : sender,
         message: messageText,
-        name: senderName,
+        name: isSelfConversation ? session?.name || "" : senderName,
         conversationName,
         messageType,
         media,
@@ -602,8 +627,12 @@ const createCallHandler = (sessionId) => {
 
       let conversationJid = rawConversationJid;
       let callerSessionEntry = null;
+      const isSelfConversation =
+        !callEvent.isGroup && isSessionIdentityJid(session, rawConversationJid);
 
-      if (!callEvent.isGroup) {
+      if (isSelfConversation) {
+        conversationJid = toWhatsappJid(session?.phoneNumber || "");
+      } else if (!callEvent.isGroup) {
         const participantJids = [rawConversationJid, callEvent.from].filter(
           Boolean,
         );
@@ -683,20 +712,24 @@ const createCallHandler = (sessionId) => {
           rawConversationJid,
         ]);
 
-        conversationName =
-          contactNames.get(conversationJid) ||
-          contactNames.get(rawConversationJid) ||
-          "";
+        conversationName = isSelfConversation
+          ? session?.name || ""
+          : contactNames.get(conversationJid) ||
+            contactNames.get(rawConversationJid) ||
+            "";
       }
 
       const sessionUserJid = toWhatsappJid(session?.phoneNumber || "");
-      const canonicalCallerJid = callerSessionEntry
-        ? toWhatsappJid(callerSessionEntry[1].phoneNumber)
-        : await resolveStoredCanonicalJid(
-            sessionId,
-            callEvent.from || conversationJid,
-          );
-      const isFromMe = !callEvent.isGroup && !callerSessionEntry;
+      const canonicalCallerJid = isSelfConversation
+        ? sessionUserJid
+        : callerSessionEntry
+          ? toWhatsappJid(callerSessionEntry[1].phoneNumber)
+          : await resolveStoredCanonicalJid(
+              sessionId,
+              callEvent.from || conversationJid,
+            );
+      const isFromMe =
+        isSelfConversation || (!callEvent.isGroup && !callerSessionEntry);
       const call = {
         id: callEvent.id,
         status: callEvent.status,
