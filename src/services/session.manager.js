@@ -29,6 +29,7 @@ import {
   addChatMessage,
   clearSessionChatCache,
   getContactNames,
+  messageExists,
   registerJidAlias,
   resolveStoredCanonicalJid,
   upsertContactNames,
@@ -487,17 +488,23 @@ const createIncomingMessageHandler = (sessionId) => {
           continue;
         }
 
+        const isAlreadyStored = await messageExists(
+          sessionId,
+          incomingMessage.key.id,
+        );
         const contactNames = await getContactNames(sessionId, [senderJid]);
         const senderName =
           contactNames.get(senderJid) || incomingMessage.pushName || "";
-        const media = isDownloadableMedia
-          ? await downloadAndUploadMedia(
-              incomingMessage,
-              messageContent,
-              messageType,
-              sessionId,
-            )
-          : sharedMessageData;
+        const media = isAlreadyStored
+          ? undefined
+          : isDownloadableMedia
+            ? await downloadAndUploadMedia(
+                incomingMessage,
+                messageContent,
+                messageType,
+                sessionId,
+              )
+            : sharedMessageData;
         const sentAt = new Date(
           convertUnixToIso(incomingMessage.messageTimestamp),
         );
@@ -622,14 +629,20 @@ const createIncomingMessageHandler = (sessionId) => {
         "Pesan WhatsApp diterima",
       );
 
-      const media = isDownloadableMedia
-        ? await downloadAndUploadMedia(
-            incomingMessage,
-            messageContent,
-            messageType,
-            sessionId,
-          )
-        : sharedMessageData;
+      const isAlreadyStored = await messageExists(
+        sessionId,
+        incomingMessage.key.id,
+      );
+      const media = isAlreadyStored
+        ? undefined
+        : isDownloadableMedia
+          ? await downloadAndUploadMedia(
+              incomingMessage,
+              messageContent,
+              messageType,
+              sessionId,
+            )
+          : sharedMessageData;
 
       const chatMessage = {
         id: incomingMessage.key.id,

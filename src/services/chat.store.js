@@ -459,6 +459,19 @@ export const listConversationMessages = async (
   };
 };
 
+export const messageExists = async (sessionId, whatsappId) => {
+  if (!sessionId || !whatsappId) {
+    return false;
+  }
+
+  const existingMessage = await prisma.whatsappMessage.findUnique({
+    where: { sessionId_whatsappId: { sessionId, whatsappId } },
+    select: { id: true },
+  });
+
+  return Boolean(existingMessage);
+};
+
 export const clearConversationCache = async (sessionId, jid) => {
   const result = await prisma.whatsappConversation.deleteMany({
     where: { sessionId, jid },
