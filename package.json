@@ -14,7 +14,7 @@
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.2",
     "@prisma/client": "^6.19.3",
-    "@whiskeysockets/baileys": "^6.7.9",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "ably": "^2.5.0",
     "axios": "^1.7.9",
     "cloudinary": "^2.5.1",
