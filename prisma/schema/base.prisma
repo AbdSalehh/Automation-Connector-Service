@@ -119,3 +119,13 @@ model WhatsappStoryEngagement {
 
   @@unique([storyId, actorJid])
 }
+
+model WhatsappExcludedChat {
+  id        String   @id @default(uuid())
+  sessionId String
+  jid       String
+  createdAt DateTime @default(now())
+
+  @@unique([sessionId, jid])
+  @@index([sessionId])
+}

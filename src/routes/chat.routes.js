@@ -4,9 +4,15 @@ import { apiKeyAuth } from "../middlewares/apiKeyAuth.js";
 import { ownerAuth, requireOwnedSession } from "../middlewares/ownerAuth.js";
 import {
   handleClearConversationCache,
+  handleGetConversationAvatar,
   handleListConversationMessages,
   handleListConversations,
 } from "../controllers/chat.controller.js";
+import {
+  handleAddExcludedChat,
+  handleListExcludedChats,
+  handleRemoveExcludedChat,
+} from "../controllers/excludedChat.controller.js";
 import {
   handleListStories,
   handleMarkStoryViewed,
@@ -30,12 +36,40 @@ chatRouter.get(
   requireOwnedSession,
   handleListConversationMessages,
 );
+chatRouter.get(
+  "/sessions/:sessionId/conversations/:jid/avatar",
+  apiKeyAuth,
+  ownerAuth,
+  requireOwnedSession,
+  handleGetConversationAvatar,
+);
 chatRouter.delete(
   "/sessions/:sessionId/conversations/:jid/cache",
   apiKeyAuth,
   ownerAuth,
   requireOwnedSession,
   handleClearConversationCache,
+);
+chatRouter.get(
+  "/sessions/:sessionId/excluded-chats",
+  apiKeyAuth,
+  ownerAuth,
+  requireOwnedSession,
+  handleListExcludedChats,
+);
+chatRouter.post(
+  "/sessions/:sessionId/excluded-chats",
+  apiKeyAuth,
+  ownerAuth,
+  requireOwnedSession,
+  handleAddExcludedChat,
+);
+chatRouter.delete(
+  "/sessions/:sessionId/excluded-chats/:jid",
+  apiKeyAuth,
+  ownerAuth,
+  requireOwnedSession,
+  handleRemoveExcludedChat,
 );
 chatRouter.get(
   "/sessions/:sessionId/stories",

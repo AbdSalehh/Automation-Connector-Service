@@ -2,6 +2,7 @@ import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import { prisma } from "../lib/prisma.js";
 import { extractNumberFromJid } from "../lib/phoneNumber.js";
+import { getExcludedJidSet } from "./excludedChat.store.js";
 
 const toDate = (value) => {
   const date = value ? new Date(value) : new Date();
@@ -399,10 +400,16 @@ export const registerJidAlias = async (
 
 export const listConversations = async (sessionId, { limit, offset }) => {
   const activeSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const excludedJidSet = await getExcludedJidSet(sessionId);
+
   const where = {
     sessionId,
     lastSentAt: { gte: activeSince },
+    ...(excludedJidSet.size > 0
+      ? { jid: { notIn: Array.from(excludedJidSet) } }
+      : {}),
   };
+
   const [conversations, totalItems] = await prisma.$transaction([
     prisma.whatsappConversation.findMany({
       where,

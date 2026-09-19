@@ -40,6 +40,7 @@ import {
   recordStoryView,
   upsertStory,
 } from "./story.store.js";
+import { isChatExcluded } from "./excludedChat.store.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -340,42 +341,60 @@ const downloadAndUploadMedia = async (
     return null;
   }
 
-  try {
-    const session = sessions.get(sessionId);
+  const session = sessions.get(sessionId);
+  const maxAttempts = 3;
 
-    const buffer = await downloadMediaMessage(
-      incomingMessage,
-      "buffer",
-      {},
-      {
-        logger,
-        reuploadRequest: session?.socket?.updateMediaMessage,
-      },
-    );
-
-    if (buffer.length > env.mediaMaxBytes) {
-      logger.warn(
-        { sessionId, bytes: buffer.length, limit: env.mediaMaxBytes },
-        "Ukuran media (setelah unduh) melebihi batas, media dilewati",
+  /**
+   * Unduhan media WhatsApp bisa gagal sesaat (Bad MAC, media kedaluwarsa,
+   * timeout). Percobaan ulang menutup mayoritas kasus story yang hanya
+   * tampil sebagai teks.
+   */
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const buffer = await downloadMediaMessage(
+        incomingMessage,
+        "buffer",
+        {},
+        {
+          logger,
+          reuploadRequest: session?.socket?.updateMediaMessage,
+        },
       );
 
-      return null;
+      if (buffer.length > env.mediaMaxBytes) {
+        logger.warn(
+          { sessionId, bytes: buffer.length, limit: env.mediaMaxBytes },
+          "Ukuran media (setelah unduh) melebihi batas, media dilewati",
+        );
+
+        return null;
+      }
+
+      return await uploadInboundMedia(buffer, {
+        mimetype: mediaInfo.mimetype,
+        fileName: mediaInfo.fileName,
+        messageType,
+        sessionId,
+      });
+    } catch (error) {
+      const isLastAttempt = attempt === maxAttempts;
+
+      logger.warn(
+        { err: error?.message, sessionId, attempt, maxAttempts },
+        isLastAttempt
+          ? "Gagal mengunduh media masuk dari WhatsApp setelah percobaan ulang"
+          : "Gagal mengunduh media masuk, mencoba ulang",
+      );
+
+      if (isLastAttempt) {
+        return null;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
     }
-
-    return await uploadInboundMedia(buffer, {
-      mimetype: mediaInfo.mimetype,
-      fileName: mediaInfo.fileName,
-      messageType,
-      sessionId,
-    });
-  } catch (error) {
-    logger.error(
-      { err: error?.message, sessionId },
-      "Gagal mengunduh media masuk dari WhatsApp",
-    );
-
-    return null;
   }
+
+  return null;
 };
 
 /**
@@ -634,16 +653,18 @@ const createIncomingMessageHandler = (sessionId) => {
         sessionId,
         incomingMessage.key.id,
       );
-      const media = isAlreadyStored
-        ? undefined
-        : isDownloadableMedia
-          ? await downloadAndUploadMedia(
-              incomingMessage,
-              messageContent,
-              messageType,
-              sessionId,
-            )
-          : sharedMessageData;
+      const isExcludedChat = await isChatExcluded(sessionId, conversationJid);
+      const media =
+        isAlreadyStored || isExcludedChat
+          ? undefined
+          : isDownloadableMedia
+            ? await downloadAndUploadMedia(
+                incomingMessage,
+                messageContent,
+                messageType,
+                sessionId,
+              )
+            : sharedMessageData;
 
       const chatMessage = {
         id: incomingMessage.key.id,
@@ -661,9 +682,16 @@ const createIncomingMessageHandler = (sessionId) => {
         receivedAt: new Date().toISOString(),
       };
 
-      await addChatMessage(sessionId, conversationJid, chatMessage);
+      /**
+       * Chat tersembunyi tidak disimpan ke cache maupun dipublikasikan
+       * realtime agar tidak muncul di daftar dan tidak memakai storage,
+       * namun webhook di bawah tetap jalan untuk automation.
+       */
+      if (!isExcludedChat) {
+        await addChatMessage(sessionId, conversationJid, chatMessage);
 
-      await publishChatUpdate(sessionId, chatMessage);
+        await publishChatUpdate(sessionId, chatMessage);
+      }
 
       /**
        * Webhook engine (menggerakkan workflow) hanya dipicu untuk pesan
@@ -1352,6 +1380,30 @@ export const getSessionStatus = (sessionId) => {
           }
         : null,
   };
+};
+
+/**
+ * Mengambil URL foto profil (user atau grup) secara on-demand. WhatsApp
+ * memberi URL yang bisa berubah, sehingga tidak di-cache. Mengembalikan null
+ * bila kontak tidak punya foto, privasi tertutup, atau sesi belum siap.
+ */
+export const fetchProfilePicture = async (sessionId, jid) => {
+  const session = sessions.get(sessionId);
+
+  if (!session || session.status !== "open" || !jid) {
+    return null;
+  }
+
+  try {
+    return (await session.socket.profilePictureUrl(jid, "image")) || null;
+  } catch (error) {
+    logger.debug(
+      { err: error?.message, sessionId, jid },
+      "Foto profil tidak tersedia",
+    );
+
+    return null;
+  }
 };
 
 /**

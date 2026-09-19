@@ -5,7 +5,10 @@ import {
   listConversationMessages,
   listConversations,
 } from "../services/chat.store.js";
-import { getSessionStatus } from "../services/session.manager.js";
+import {
+  fetchProfilePicture,
+  getSessionStatus,
+} from "../services/session.manager.js";
 
 const parsePositiveInteger = (value, fallback, maximum) => {
   const parsedValue = Number.parseInt(value, 10);
@@ -118,5 +121,32 @@ export const handleClearConversationCache = async (request, response) => {
       ? "Cache percakapan berhasil dihapus"
       : "Cache percakapan sudah kosong",
     data: { deleted: wasDeleted },
+  });
+};
+
+export const handleGetConversationAvatar = async (request, response) => {
+  const sessionId = validateSession(request, response);
+
+  if (!sessionId) {
+    return;
+  }
+
+  const jid = decodeURIComponent(request.params.jid || "").trim();
+
+  if (!jid || !isValidConversationJid(jid)) {
+    return sendError(response, {
+      statusCode: 400,
+      message: "Format JID percakapan tidak valid",
+    });
+  }
+
+  const avatarUrl = await fetchProfilePicture(sessionId, jid);
+
+  return sendSuccess(response, {
+    statusCode: 200,
+    message: avatarUrl
+      ? "Foto profil berhasil diambil"
+      : "Foto profil tidak tersedia",
+    data: { avatarUrl },
   });
 };
