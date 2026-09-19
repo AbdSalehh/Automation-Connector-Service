@@ -1,6 +1,7 @@
 import {
   makeWASocket,
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   DisconnectReason,
   fetchLatestBaileysVersion,
   downloadMediaMessage,
@@ -941,6 +942,94 @@ const createMessageStatusHandler = (sessionId) => {
 };
 
 /**
+ * Menangani tanda terima baca/view pada story (status@broadcast).
+ * Saat seseorang melihat status yang diunggah oleh akun ini, Baileys
+ * memancarkan event message-receipt.update.
+ */
+const createStoryReceiptHandler = (sessionId) => {
+  return async (receiptUpdates) => {
+    for (const { key, receipt } of receiptUpdates) {
+      const isStatusMessage =
+        key?.remoteJid === "status@broadcast" ||
+        key?.remoteJid?.endsWith("@broadcast");
+
+      if (!isStatusMessage) {
+        continue;
+      }
+
+      const whatsappId = key?.id;
+      const actorJid = receipt?.userJid;
+
+      if (!whatsappId || !actorJid) {
+        continue;
+      }
+
+      try {
+        await recordStoryView(sessionId, whatsappId, actorJid);
+      } catch (error) {
+        logger.error(
+          { err: error?.message, sessionId, whatsappId, actorJid },
+          "Gagal mencatat view story",
+        );
+      }
+    }
+  };
+};
+
+/**
+ * Menangani reaksi emoji pada story (status@broadcast).
+ * Saat seseorang memberi reaksi atau mencabut reaksi pada story,
+ * Baileys memancarkan event messages.reaction.
+ */
+const createStoryReactionHandler = (sessionId) => {
+  return async (reactions) => {
+    for (const { key, reaction } of reactions) {
+      const isStatusMessage =
+        key?.remoteJid === "status@broadcast" ||
+        key?.remoteJid?.endsWith("@broadcast");
+
+      if (!isStatusMessage) {
+        continue;
+      }
+
+      const whatsappId = key?.id;
+
+      if (!whatsappId) {
+        continue;
+      }
+
+      const actorJid =
+        reaction?.key?.participant ||
+        reaction?.key?.remoteJid ||
+        key?.participant;
+
+      if (!actorJid) {
+        continue;
+      }
+
+      const contactNames = await getContactNames(sessionId, [actorJid]);
+      const actorName = contactNames.get(actorJid) || "";
+      const hasReaction = Boolean(reaction?.text);
+
+      try {
+        await recordStoryReaction(
+          sessionId,
+          whatsappId,
+          actorJid,
+          actorName,
+          hasReaction,
+        );
+      } catch (error) {
+        logger.error(
+          { err: error?.message, sessionId, whatsappId, actorJid },
+          "Gagal mencatat reaksi story",
+        );
+      }
+    }
+  };
+};
+
+/**
  * Menangani pembaruan status koneksi untuk sebuah sesi, termasuk
  * menampilkan QR code, melakukan reconnect otomatis, dan
  * memulihkan sesi secara otomatis saat terjadi logout.
@@ -1184,11 +1273,15 @@ export const startSession = async (sessionId) => {
 
     const socket = makeWASocket({
       version,
-      auth: state,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+      },
       logger,
       printQRInTerminal: false,
       syncFullHistory: true,
       shouldSyncHistoryMessage: () => true,
+      getMessage: async () => undefined,
     });
 
     const existingSession = sessions.get(sessionId);
