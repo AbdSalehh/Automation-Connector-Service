@@ -13,9 +13,72 @@ export const getExcludedJidSet = async (sessionId) => {
 };
 
 export const listExcludedChats = async (sessionId) => {
-  return prisma.whatsappExcludedChat.findMany({
+  const excludedChats = await prisma.whatsappExcludedChat.findMany({
     where: { sessionId },
     orderBy: { createdAt: "desc" },
+  });
+
+  const excludedJids = excludedChats.map((excludedChat) => excludedChat.jid);
+
+  const contacts = await prisma.whatsappContact.findMany({
+    where: {
+      sessionId,
+      jid: { in: excludedJids },
+    },
+    select: { jid: true, name: true },
+  });
+
+  const lidJids = excludedJids.filter((jid) => jid.endsWith("@lid"));
+
+  const aliases =
+    lidJids.length > 0
+      ? await prisma.whatsappJidAlias.findMany({
+          where: {
+            sessionId,
+            aliasJid: { in: lidJids },
+          },
+          select: { aliasJid: true, canonicalJid: true, name: true },
+        })
+      : [];
+
+  const aliasByLid = new Map(
+    aliases.map((alias) => [alias.aliasJid, alias]),
+  );
+
+  const aliasCanonicalJids = aliases.map((alias) => alias.canonicalJid);
+
+  const aliasContacts =
+    aliasCanonicalJids.length > 0
+      ? await prisma.whatsappContact.findMany({
+          where: {
+            sessionId,
+            jid: { in: aliasCanonicalJids },
+          },
+          select: { jid: true, name: true },
+        })
+      : [];
+
+  const contactNameByJid = new Map([
+    ...contacts.map((contact) => [contact.jid, contact.name]),
+    ...aliasContacts.map((contact) => [contact.jid, contact.name]),
+  ]);
+
+  return excludedChats.map((excludedChat) => {
+    const alias = aliasByLid.get(excludedChat.jid);
+
+    const resolvedName =
+      contactNameByJid.get(excludedChat.jid) ||
+      (alias ? contactNameByJid.get(alias.canonicalJid) : null) ||
+      alias?.name ||
+      "";
+
+    return {
+      id: excludedChat.id,
+      sessionId: excludedChat.sessionId,
+      jid: excludedChat.jid,
+      name: resolvedName,
+      createdAt: excludedChat.createdAt,
+    };
   });
 };
 

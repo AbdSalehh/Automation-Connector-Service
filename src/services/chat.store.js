@@ -420,12 +420,59 @@ export const listConversations = async (sessionId, { limit, offset }) => {
     prisma.whatsappConversation.count({ where }),
   ]);
 
+  const nonGroupJids = conversations
+    .filter((conversation) => !conversation.jid.endsWith("@g.us"))
+    .map((conversation) => conversation.jid);
+
+  const lidJids = nonGroupJids.filter((jid) => jid.endsWith("@lid"));
+
+  const aliases =
+    lidJids.length > 0
+      ? await prisma.whatsappJidAlias.findMany({
+          where: {
+            sessionId,
+            aliasJid: { in: lidJids },
+          },
+          select: { aliasJid: true, canonicalJid: true, name: true },
+        })
+      : [];
+
+  const aliasByLid = new Map(
+    aliases.map((alias) => [alias.aliasJid, alias]),
+  );
+
+  const allJidsToLookup = [
+    ...nonGroupJids,
+    ...aliases.map((alias) => alias.canonicalJid),
+  ];
+
+  const contactNames = await getContactNames(sessionId, allJidsToLookup);
+
   return {
-    data: conversations.map((conversation) => ({
-      jid: conversation.jid,
-      name: conversation.name?.trim() || resolveDisplayName(conversation.jid),
-      lastMessage: conversation.lastMessage,
-    })),
+    data: conversations.map((conversation) => {
+      if (conversation.jid.endsWith("@g.us")) {
+        return {
+          jid: conversation.jid,
+          name: conversation.name?.trim() || "Grup WhatsApp",
+          lastMessage: conversation.lastMessage,
+        };
+      }
+
+      const alias = aliasByLid.get(conversation.jid);
+
+      const contactName =
+        contactNames.get(conversation.jid) ||
+        (alias ? contactNames.get(alias.canonicalJid) : null) ||
+        alias?.name ||
+        conversation.name?.trim() ||
+        resolveDisplayName(conversation.jid);
+
+      return {
+        jid: conversation.jid,
+        name: contactName,
+        lastMessage: conversation.lastMessage,
+      };
+    }),
     metadata: {
       limit,
       offset,

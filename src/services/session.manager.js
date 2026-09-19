@@ -33,6 +33,7 @@ import {
   messageExists,
   registerJidAlias,
   resolveStoredCanonicalJid,
+  updateConversationName,
   upsertContactNames,
 } from "./chat.store.js";
 import {
@@ -557,32 +558,6 @@ const createIncomingMessageHandler = (sessionId) => {
       const messageText = extractMessageText(incomingMessage.message);
       const messageContent = unwrapMessage(incomingMessage.message);
       const mentionJids = extractMentionJids(incomingMessage.message);
-      const senderJid =
-        incomingMessage.key.participant ||
-        incomingMessage.key.participantPn ||
-        remoteJid;
-      const contactNames = await getContactNames(sessionId, [
-        senderJid,
-        remoteJid,
-        ...mentionJids,
-      ]);
-      const senderName =
-        contactNames.get(senderJid) || incomingMessage.pushName || "";
-      const mentions = resolveMentions(mentionJids, contactNames);
-
-      const messageType = detectMessageType(messageContent);
-      const isDownloadableMedia = [
-        "image",
-        "video",
-        "audio",
-        "document",
-        "sticker",
-      ].includes(messageType);
-      const sharedMessageData = extractSharedMessageData(
-        messageContent,
-        messageType,
-      );
-      const replyTo = extractReplyContext(incomingMessage.message);
       const session = sessions.get(sessionId);
       const sessionUserJid = session?.phoneNumber
         ? toWhatsappJid(session.phoneNumber)
@@ -602,6 +577,51 @@ const createIncomingMessageHandler = (sessionId) => {
         incomingMessage.key.participantPn,
       ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
 
+      const senderJid =
+        incomingMessage.key.participant ||
+        incomingMessage.key.participantPn ||
+        remoteJid;
+
+      const canonicalSenderJid = await resolveStoredCanonicalJid(
+        sessionId,
+        senderJid,
+      );
+
+      const conversationJid = isSelfConversation
+        ? sessionUserJid
+        : await resolveStoredCanonicalJid(sessionId, resolvedMessageJid);
+
+      const contactNames = await getContactNames(sessionId, [
+        senderJid,
+        canonicalSenderJid,
+        remoteJid,
+        conversationJid,
+        resolvedMessageJid,
+        alternatePhoneJid,
+        ...mentionJids,
+      ]);
+
+      const senderName =
+        contactNames.get(senderJid) ||
+        contactNames.get(canonicalSenderJid) ||
+        incomingMessage.pushName ||
+        "";
+      const mentions = resolveMentions(mentionJids, contactNames);
+
+      const messageType = detectMessageType(messageContent);
+      const isDownloadableMedia = [
+        "image",
+        "video",
+        "audio",
+        "document",
+        "sticker",
+      ].includes(messageType);
+      const sharedMessageData = extractSharedMessageData(
+        messageContent,
+        messageType,
+      );
+      const replyTo = extractReplyContext(incomingMessage.message);
+
       if (
         !isSelfConversation &&
         remoteJid.endsWith("@lid") &&
@@ -615,14 +635,13 @@ const createIncomingMessageHandler = (sessionId) => {
         );
       }
 
-      const conversationJid = isSelfConversation
-        ? sessionUserJid
-        : await resolveStoredCanonicalJid(sessionId, resolvedMessageJid);
       const conversationName = isSelfConversation
         ? session?.name || ""
         : remoteJid.endsWith("@g.us")
           ? await resolveConversationName(session?.socket, remoteJid)
           : contactNames.get(conversationJid) ||
+            contactNames.get(resolvedMessageJid) ||
+            contactNames.get(alternatePhoneJid) ||
             contactNames.get(remoteJid) ||
             (isFromMe ? "" : senderName);
 
@@ -937,13 +956,40 @@ const createContactHandler = (sessionId) => {
         jid?.endsWith("@lid"),
       );
 
+      const displayName =
+        contact.name || contact.verifiedName || contact.notify || "";
+
       if (phoneJid && lidJid) {
         await registerJidAlias(
           sessionId,
           lidJid,
           phoneJid,
-          contact.name || contact.notify || contact.verifiedName || "",
+          displayName,
         );
+      }
+
+      if (contact.name?.trim()) {
+        await updateConversationName(
+          sessionId,
+          contact.id,
+          contact.name.trim(),
+        );
+
+        if (phoneJid) {
+          await updateConversationName(
+            sessionId,
+            phoneJid,
+            contact.name.trim(),
+          );
+        }
+
+        if (lidJid) {
+          await updateConversationName(
+            sessionId,
+            lidJid,
+            contact.name.trim(),
+          );
+        }
       }
     }
   };
