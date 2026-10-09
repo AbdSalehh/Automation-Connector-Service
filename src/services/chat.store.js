@@ -219,6 +219,14 @@ export const addChatMessage = async (
         call: normalizedMessage.call,
         sentAt: normalizedMessage.sentAt,
         /**
+         * Arah panggilan baru diketahui pasti ketika riwayat app-state tiba,
+         * setelah barisnya mungkin sudah dibuat dari event `call` langsung.
+         */
+        fromMe: normalizedMessage.fromMe,
+        ...(normalizedMessage.sender
+          ? { sender: normalizedMessage.sender }
+          : {}),
+        /**
          * Media hanya ditimpa bila pemanggil benar-benar membawa media baru.
          * Pesan yang sudah tersimpan dikirim ulang tanpa media (`undefined`)
          * agar tidak diunduh dua kali, sehingga menulis `null` begitu saja
@@ -326,6 +334,12 @@ export const updateConversationName = async (sessionId, jid, name) => {
   });
 };
 
+/**
+ * Menyimpan nama kontak. Entri bertanda `isFallbackName` berasal dari username
+ * WhatsApp (`notify`), bukan dari buku kontak perangkat utama, sehingga hanya
+ * dipakai saat kontak belum punya nama tersimpan. Tanpa penjaga ini satu event
+ * `contacts.update` yang hanya membawa username bisa menimpa nama kontak asli.
+ */
 export const upsertContactNames = async (sessionId, contacts) => {
   const validContacts = contacts.filter(
     (contact) => contact.jid && contact.name?.trim(),
@@ -342,7 +356,7 @@ export const upsertContactNames = async (sessionId, contacts) => {
           jid: contact.jid,
           name: contact.name.trim(),
         },
-        update: { name: contact.name.trim() },
+        update: contact.isFallbackName ? {} : { name: contact.name.trim() },
       }),
     ),
   );
@@ -556,6 +570,31 @@ export const listConversationMessages = async (
       nextOffset: offset + messages.length,
     },
   };
+};
+
+/**
+ * Mencari id pesan panggilan yang sudah tersimpan untuk sebuah `callId`.
+ *
+ * Satu panggilan dapat terlihat dari dua jalur: event `call` secara langsung
+ * dan mutasi app-state `callLogAction` yang menyusul. Keduanya memakai
+ * `callId` yang sama namun stempel waktu berbeda, sehingga pencocokan lewat
+ * awalan `call:<callId>:` mencegah satu panggilan tercatat dua kali.
+ */
+export const findCallMessageId = async (sessionId, callId) => {
+  if (!sessionId || !callId) {
+    return null;
+  }
+
+  const existingMessage = await prisma.whatsappMessage.findFirst({
+    where: {
+      sessionId,
+      messageType: "call",
+      whatsappId: { startsWith: `call:${callId}:` },
+    },
+    select: { whatsappId: true },
+  });
+
+  return existingMessage?.whatsappId ?? null;
 };
 
 export const messageExists = async (sessionId, whatsappId) => {

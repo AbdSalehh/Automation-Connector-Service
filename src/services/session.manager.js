@@ -29,6 +29,7 @@ import { uploadInboundMedia } from "./media.service.js";
 import {
   addChatMessage,
   clearSessionChatCache,
+  findCallMessageId,
   getContactNames,
   messageExists,
   registerJidAlias,
@@ -42,6 +43,7 @@ import {
   upsertStory,
 } from "./story.store.js";
 import { isChatExcluded } from "./excludedChat.store.js";
+import { createCallLogTappedLogger } from "../lib/callLogTap.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -531,9 +533,30 @@ const createIncomingMessageHandler = (sessionId) => {
           sessionId,
           incomingMessage.key.id,
         );
-        const contactNames = await getContactNames(sessionId, [senderJid]);
+        /**
+         * Nama kontak dicari pada seluruh varian JID pengirim sebelum jatuh ke
+         * `pushName` (username WhatsApp). Nama final tetap diselesaikan ulang
+         * saat story dibaca, sehingga kontak yang tersinkron belakangan tetap
+         * tampil dengan nama dari perangkat utama.
+         */
+        const senderJidVariants = [
+          senderJid,
+          incomingMessage.key.participantPn,
+          incomingMessage.key.participant,
+          incomingMessage.key.remoteJidAlt,
+          await resolveStoredCanonicalJid(sessionId, senderJid),
+        ].filter(Boolean);
+
+        const contactNames = await getContactNames(
+          sessionId,
+          senderJidVariants,
+        );
         const senderName =
-          contactNames.get(senderJid) || incomingMessage.pushName || "";
+          senderJidVariants
+            .map((variantJid) => contactNames.get(variantJid))
+            .find(Boolean) ||
+          incomingMessage.pushName ||
+          "";
         const media = isAlreadyStored
           ? undefined
           : isDownloadableMedia
@@ -1001,6 +1024,210 @@ const createCallHandler = (sessionId) => {
 };
 
 /**
+ * Memetakan `CallLogRecord.CallResult` ke status panggilan yang dipakai di
+ * seluruh aplikasi. Nilai dapat tiba sebagai angka (hasil dekode protobuf)
+ * maupun nama enum, sehingga keduanya dipetakan.
+ */
+const CALL_RESULT_STATUS = {
+  0: "terminate",
+  1: "reject",
+  2: "timeout",
+  3: "accept",
+  4: "timeout",
+  5: "terminate",
+  6: "timeout",
+  7: "offer",
+  8: "timeout",
+  9: "timeout",
+  10: "accept",
+  CONNECTED: "terminate",
+  REJECTED: "reject",
+  CANCELLED: "timeout",
+  ACCEPTEDELSEWHERE: "accept",
+  MISSED: "timeout",
+  INVALID: "terminate",
+  UNAVAILABLE: "timeout",
+  UPCOMING: "offer",
+  FAILED: "timeout",
+  ABANDONED: "timeout",
+  ONGOING: "accept",
+};
+
+/**
+ * Batas usia riwayat panggilan yang ikut disimpan. Sinkronisasi app-state
+ * pertama membawa riwayat panjang; tanpa batas ini percakapan lama akan
+ * dibangkitkan kembali hanya karena pernah ada panggilan di dalamnya.
+ */
+const CALL_LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Mengubah nilai number/Long protobuf menjadi number biasa. */
+const toPlainNumber = (value) => {
+  if (value === null || value === undefined) {
+    return 0;
+  }
+
+  return typeof value === "number"
+    ? value
+    : (value.toNumber?.() ?? Number(value));
+};
+
+/**
+ * Mencatat satu entri riwayat panggilan dari app-state WhatsApp.
+ *
+ * Ini satu-satunya sumber yang memuat panggilan KELUAR, karena stanza `call`
+ * hanya dikirim WhatsApp untuk panggilan masuk. Record-nya juga lebih
+ * tepercaya daripada event langsung: arah dan durasi sudah final, sehingga
+ * dipakai untuk memperbaiki baris yang mungkin sudah dibuat event `call`.
+ */
+const createCallLogHandler = (sessionId) => {
+  return async ({ record: callLogRecord, index }) => {
+    const session = sessions.get(sessionId);
+    const callId = callLogRecord.callId;
+
+    logger.info(
+      {
+        sessionId,
+        callId,
+        isIncoming: callLogRecord.isIncoming,
+        callCreatorJid: callLogRecord.callCreatorJid,
+        participantCount: callLogRecord.participants?.length ?? 0,
+        index,
+      },
+      "Riwayat panggilan app-state diterima",
+    );
+
+    if (!callId) {
+      return;
+    }
+
+    const startedAtMs = toPlainNumber(callLogRecord.startTime) * 1000;
+    const callDate = startedAtMs ? new Date(startedAtMs) : new Date();
+
+    if (Date.now() - callDate.getTime() > CALL_LOG_MAX_AGE_MS) {
+      return;
+    }
+
+    const isIncoming = Boolean(callLogRecord.isIncoming);
+    const isGroup = Boolean(callLogRecord.groupJid);
+    const participantJids = (callLogRecord.participants || [])
+      .map((participant) => participant?.userJid)
+      .filter(Boolean);
+
+    /**
+     * JID pada index mutasi dipakai sebagai cadangan, karena `participants`
+     * kerap kosong untuk panggilan satu lawan satu.
+     */
+    const indexJids = index.filter(
+      (indexEntry) =>
+        typeof indexEntry === "string" &&
+        (indexEntry.endsWith("@s.whatsapp.net") || indexEntry.endsWith("@lid")),
+    );
+
+    /**
+     * Lawan bicara: saat menerima, si pembuat panggilan; saat menelepon,
+     * peserta mana pun yang bukan identitas sesi ini.
+     */
+    const counterpartCandidates = (
+      isGroup
+        ? [callLogRecord.groupJid]
+        : isIncoming
+          ? [callLogRecord.callCreatorJid, ...participantJids, ...indexJids]
+          : [...participantJids, ...indexJids]
+    ).filter(
+      (candidateJid) =>
+        candidateJid &&
+        (isGroup || isIncoming || !isSessionIdentityJid(session, candidateJid)),
+    );
+
+    const counterpartJid = counterpartCandidates[0];
+
+    if (!counterpartJid) {
+      logger.warn(
+        { sessionId, callId, isIncoming },
+        "Riwayat panggilan dilewati karena lawan bicara tidak dikenali",
+      );
+
+      return;
+    }
+
+    const counterpartPhoneJid = counterpartCandidates.find((candidateJid) =>
+      candidateJid?.endsWith("@s.whatsapp.net"),
+    );
+
+    if (counterpartPhoneJid) {
+      for (const candidateJid of counterpartCandidates) {
+        if (candidateJid?.endsWith("@lid")) {
+          await registerJidAlias(
+            sessionId,
+            normalizeIdentityJid(candidateJid),
+            counterpartPhoneJid,
+          );
+        }
+      }
+    }
+
+    const conversationJid = isGroup
+      ? counterpartJid
+      : counterpartPhoneJid ||
+        (await resolveStoredCanonicalJid(
+          sessionId,
+          resolveCanonicalJid({ remoteJid: counterpartJid }),
+        ));
+
+    const contactNames = await getContactNames(sessionId, [
+      conversationJid,
+      counterpartJid,
+    ]);
+    const conversationName = isGroup
+      ? await resolveConversationName(session?.socket, conversationJid)
+      : contactNames.get(conversationJid) ||
+        contactNames.get(counterpartJid) ||
+        "";
+
+    const durationSeconds = toPlainNumber(callLogRecord.duration);
+    const isVideo = Boolean(callLogRecord.isVideo);
+
+    /**
+     * Pakai kembali id pesan yang sudah ada bila panggilan ini pernah tercatat
+     * dari event `call`, agar tidak muncul dua baris untuk satu panggilan.
+     */
+    const existingMessageId = await findCallMessageId(sessionId, callId);
+
+    const chatMessage = {
+      id: existingMessageId || `call:${callId}:${callDate.getTime()}`,
+      jid: conversationJid,
+      sender: isIncoming
+        ? extractNumberFromJid(conversationJid)
+        : session?.phoneNumber || "",
+      message: isVideo ? "Video call" : "Voice call",
+      name: isIncoming ? conversationName : "",
+      conversationName,
+      messageType: "call",
+      media: null,
+      replyTo: null,
+      call: {
+        id: callId,
+        status: CALL_RESULT_STATUS[callLogRecord.callResult] || "terminate",
+        isVideo,
+        isGroup,
+        durationSeconds: durationSeconds > 0 ? durationSeconds : null,
+      },
+      fromMe: !isIncoming,
+      sentAt: callDate.toISOString(),
+      receivedAt: new Date().toISOString(),
+    };
+
+    await addChatMessage(sessionId, conversationJid, chatMessage);
+    await publishChatUpdate(sessionId, chatMessage);
+
+    logger.info(
+      { sessionId, callId, isIncoming, durationSeconds },
+      "Riwayat panggilan dari app-state dicatat",
+    );
+  };
+};
+
+/**
  * Memetakan kode status pesan Baileys menjadi label yang mudah dibaca.
  * Status 2 (server ack/centang satu) berarti pesan baru sampai server WhatsApp,
  * sedangkan 3 (delivery ack/centang dua) berarti pesan sampai ke perangkat
@@ -1020,57 +1247,69 @@ const MESSAGE_STATUS_LABEL = {
  * untuk mengetahui apakah pesan benar-benar sampai ke penerima atau hanya
  * diterima server, karena `sendMessage` yang sukses belum menjamin pengiriman.
  */
+/**
+ * Mengurai satu entri kontak Baileys menjadi seluruh varian JID-nya beserta
+ * nama tampilannya.
+ *
+ * `contact.name` adalah nama yang disimpan pengguna di buku kontak perangkat
+ * utama, sedangkan `contact.notify` adalah username WhatsApp yang dipilih
+ * sendiri oleh pemilik nomor. Keduanya dibedakan agar username tidak pernah
+ * menimpa nama kontak yang sudah tersimpan.
+ */
+const parseContactEntry = (contact) => {
+  const savedName = (contact.name || contact.verifiedName || "").trim();
+  const pushName = (contact.notify || "").trim();
+
+  const phoneJid = [contact.id, contact.phoneNumber, contact.pn].find((jid) =>
+    jid?.endsWith("@s.whatsapp.net"),
+  );
+  const lidJid = [contact.id, contact.lid].find((jid) => jid?.endsWith("@lid"));
+
+  return {
+    savedName,
+    displayName: savedName || pushName,
+    isFallbackName: !savedName,
+    phoneJid,
+    lidJid,
+    /**
+     * WhatsApp memakai `@lid` maupun nomor telepon untuk kontak yang sama.
+     * Nama disimpan di bawah semua varian agar pencarian nama tidak gagal
+     * hanya karena pemanggil memegang varian JID yang berbeda.
+     */
+    jids: Array.from(new Set([contact.id, phoneJid, lidJid].filter(Boolean))),
+  };
+};
+
 const createContactHandler = (sessionId) => {
   return async (contacts) => {
+    const contactEntries = contacts.map(parseContactEntry);
+
     await upsertContactNames(
       sessionId,
-      contacts.map((contact) => ({
-        jid: contact.id,
-        name: contact.name || contact.notify || contact.verifiedName || "",
-      })),
+      contactEntries.flatMap((contactEntry) =>
+        contactEntry.displayName
+          ? contactEntry.jids.map((jid) => ({
+              jid,
+              name: contactEntry.displayName,
+              isFallbackName: contactEntry.isFallbackName,
+            }))
+          : [],
+      ),
     );
 
-    for (const contact of contacts) {
-      const phoneJid = [contact.id, contact.phoneNumber, contact.pn].find(
-        (jid) => jid?.endsWith("@s.whatsapp.net"),
-      );
-      const lidJid = [contact.id, contact.lid].find((jid) =>
-        jid?.endsWith("@lid"),
-      );
-
-      const displayName =
-        contact.name || contact.verifiedName || contact.notify || "";
-
-      if (phoneJid && lidJid) {
+    for (const contactEntry of contactEntries) {
+      if (contactEntry.phoneJid && contactEntry.lidJid) {
         await registerJidAlias(
           sessionId,
-          lidJid,
-          phoneJid,
-          displayName,
+          contactEntry.lidJid,
+          contactEntry.phoneJid,
+          contactEntry.displayName,
         );
       }
 
-      if (contact.name?.trim()) {
-        await updateConversationName(
-          sessionId,
-          contact.id,
-          contact.name.trim(),
-        );
-
-        if (phoneJid) {
-          await updateConversationName(
-            sessionId,
-            phoneJid,
-            contact.name.trim(),
-          );
-        }
-
-        if (lidJid) {
-          await updateConversationName(
-            sessionId,
-            lidJid,
-            contact.name.trim(),
-          );
+      if (contactEntry.savedName) {
+        for (const jid of contactEntry.jids) {
+          await updateConversationName(sessionId, jid, contactEntry.savedName);
         }
       }
     }
@@ -1427,13 +1666,22 @@ export const startSession = async (sessionId) => {
 
     const { version } = await fetchLatestBaileysVersion();
 
+    /**
+     * Logger socket disadap agar mutasi app-state `callLogAction` — satu-satunya
+     * sumber riwayat panggilan KELUAR — bisa ditangkap. Lihat `callLogTap.js`.
+     */
+    const socketLogger = createCallLogTappedLogger(
+      logger,
+      createCallLogHandler(sessionId),
+    );
+
     const socket = makeWASocket({
       version,
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      logger,
+      logger: socketLogger,
       printQRInTerminal: false,
       syncFullHistory: true,
       shouldSyncHistoryMessage: () => true,
