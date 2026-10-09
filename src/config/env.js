@@ -8,6 +8,12 @@ export const env = {
   baileysOwnerSecret: (process.env.BAILEYS_OWNER_SECRET || "").trim(),
   autoflowWebhookUrl: (process.env.AUTOFLOW_WEBHOOK_URL || "").trim(),
   authFolder: (process.env.AUTH_FOLDER || "./auth_info_baileys").trim(),
+  /**
+   * Zona waktu untuk batas kalender "hari ini" (mis. riwayat panggilan harian).
+   * Kontainer berjalan dalam UTC, sehingga tanpa ini panggilan sebelum pukul
+   * 07:00 WIB akan dihitung sebagai hari sebelumnya.
+   */
+  timezone: (process.env.TIMEZONE || "Asia/Jakarta").trim(),
   corsOrigins: process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(",").map((origin) => origin.trim())
     : ["http://localhost:3000"],

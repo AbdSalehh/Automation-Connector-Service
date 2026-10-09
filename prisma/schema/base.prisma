@@ -81,6 +81,7 @@ model WhatsappMessage {
 
   @@unique([sessionId, whatsappId])
   @@index([sessionId, jid, sentAt(sort: Desc)])
+  @@index([sessionId, messageType, sentAt(sort: Desc)])
   @@index([sentAt])
 }
 

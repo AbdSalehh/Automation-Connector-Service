@@ -3,6 +3,44 @@ import { logger } from "../config/logger.js";
 import { prisma } from "../lib/prisma.js";
 import { extractNumberFromJid } from "../lib/phoneNumber.js";
 import { getExcludedJidSet } from "./excludedChat.store.js";
+import { extractCloudName, getActiveCloudName } from "./media.service.js";
+
+/**
+ * Menandai media yang diunggah ke akun Cloudinary LAIN dari yang aktif
+ * sekarang. Setelah kredensial Cloudinary diganti (mis. karena kuota penuh),
+ * URL lama tetap tersimpan di database tapi berkasnya tidak lagi dapat diakses.
+ * Dengan flag `isStale`, frontend bisa menampilkan placeholder "media tidak
+ * tersedia" alih-alih gambar rusak atau tautan mati.
+ *
+ * Nama cloud dibaca dari field `cloudName` bila ada, atau diurai dari URL agar
+ * baris lama (yang belum menyimpan field itu) tetap ikut terdeteksi.
+ */
+const decorateMedia = (media) => {
+  if (!media || typeof media !== "object" || !media.url) {
+    return media ?? null;
+  }
+
+  const activeCloudName = getActiveCloudName();
+  const mediaCloudName = media.cloudName || extractCloudName(media.url);
+
+  if (!activeCloudName || !mediaCloudName) {
+    return media;
+  }
+
+  return { ...media, isStale: mediaCloudName !== activeCloudName };
+};
+
+/**
+ * Versi `decorateMedia` untuk ringkasan `lastMessage` yang disimpan sebagai
+ * JSON pada baris conversation.
+ */
+const decorateLastMessage = (lastMessage) => {
+  if (!lastMessage || typeof lastMessage !== "object") {
+    return lastMessage ?? null;
+  }
+
+  return { ...lastMessage, media: decorateMedia(lastMessage.media) };
+};
 
 const toDate = (value) => {
   const date = value ? new Date(value) : new Date();
@@ -52,7 +90,7 @@ const serializeMessage = (message) => ({
   message: message.message,
   name: message.name,
   messageType: message.messageType,
-  media: message.media,
+  media: decorateMedia(message.media),
   replyTo: message.replyTo,
   mentions: message.mentions,
   call: message.call,
@@ -180,6 +218,13 @@ export const addChatMessage = async (
         mentions: normalizedMessage.mentions,
         call: normalizedMessage.call,
         sentAt: normalizedMessage.sentAt,
+        /**
+         * Media hanya ditimpa bila pemanggil benar-benar membawa media baru.
+         * Pesan yang sudah tersimpan dikirim ulang tanpa media (`undefined`)
+         * agar tidak diunduh dua kali, sehingga menulis `null` begitu saja
+         * akan menghapus berkas yang sudah tersimpan.
+         */
+        ...(normalizedMessage.media ? { media: normalizedMessage.media } : {}),
       },
     });
 
@@ -454,7 +499,7 @@ export const listConversations = async (sessionId, { limit, offset }) => {
         return {
           jid: conversation.jid,
           name: conversation.name?.trim() || "Grup WhatsApp",
-          lastMessage: conversation.lastMessage,
+          lastMessage: decorateLastMessage(conversation.lastMessage),
         };
       }
 
@@ -470,7 +515,7 @@ export const listConversations = async (sessionId, { limit, offset }) => {
       return {
         jid: conversation.jid,
         name: contactName,
-        lastMessage: conversation.lastMessage,
+        lastMessage: decorateLastMessage(conversation.lastMessage),
       };
     }),
     metadata: {

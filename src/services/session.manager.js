@@ -329,6 +329,22 @@ const downloadAndUploadMedia = async (
     return null;
   }
 
+  /**
+   * Media yang dilewati atau gagal diunduh tetap disimpan sebagai metadata
+   * tanpa URL. Tanpa penanda ini pesan dokumen/gambar yang gagal diproses
+   * tersimpan dengan `media: null` sehingga tidak menampilkan apa pun di
+   * frontend — pesan terlihat hilang. Dengan `unavailable`, frontend bisa
+   * menampilkan nama berkas beserta alasannya.
+   */
+  const buildUnavailableMedia = (reason) => ({
+    url: "",
+    mimetype: mediaInfo.mimetype,
+    fileName: mediaInfo.fileName,
+    fileLength: mediaInfo.fileLength,
+    unavailable: true,
+    reason,
+  });
+
   if (mediaInfo.fileLength > env.mediaMaxBytes) {
     logger.warn(
       {
@@ -339,7 +355,7 @@ const downloadAndUploadMedia = async (
       "Ukuran media melebihi batas, media dilewati",
     );
 
-    return null;
+    return buildUnavailableMedia("too_large");
   }
 
   const session = sessions.get(sessionId);
@@ -368,15 +384,17 @@ const downloadAndUploadMedia = async (
           "Ukuran media (setelah unduh) melebihi batas, media dilewati",
         );
 
-        return null;
+        return buildUnavailableMedia("too_large");
       }
 
-      return await uploadInboundMedia(buffer, {
+      const uploadedMedia = await uploadInboundMedia(buffer, {
         mimetype: mediaInfo.mimetype,
         fileName: mediaInfo.fileName,
         messageType,
         sessionId,
       });
+
+      return uploadedMedia ?? buildUnavailableMedia("upload_failed");
     } catch (error) {
       const isLastAttempt = attempt === maxAttempts;
 
@@ -388,14 +406,14 @@ const downloadAndUploadMedia = async (
       );
 
       if (isLastAttempt) {
-        return null;
+        return buildUnavailableMedia("download_failed");
       }
 
       await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
     }
   }
 
-  return null;
+  return buildUnavailableMedia("download_failed");
 };
 
 /**
@@ -743,24 +761,66 @@ const createCallHandler = (sessionId) => {
     for (const callEvent of callEvents || []) {
       const rawConversationJid = callEvent.groupJid || callEvent.chatId;
 
+      /**
+       * Dicatat agar arah panggilan (masuk/keluar) bisa diverifikasi langsung
+       * dari log kontainer bila ada perangkat yang mengirim atribut berbeda.
+       */
+      logger.info(
+        {
+          sessionId,
+          callId: callEvent.id,
+          status: callEvent.status,
+          chatId: callEvent.chatId,
+          from: callEvent.from,
+          callerPn: callEvent.callerPn,
+          isGroup: Boolean(callEvent.isGroup),
+        },
+        "Event panggilan WhatsApp diterima",
+      );
+
       if (!rawConversationJid || !callEvent.id) {
         continue;
       }
 
-      let conversationJid = rawConversationJid;
+      /**
+       * Arah panggilan ditentukan dari penelepon, bukan dari ada/tidaknya sesi
+       * lain yang dikelola service ini. Baileys mengisi `from` dengan
+       * `call-creator`, dan `callerPn` dengan nomor telepon asli saat `from`
+       * berupa LID. Bila penelepon adalah identitas sesi ini sendiri, berarti
+       * panggilan dibuat dari perangkat kita (panggilan keluar).
+       */
+      const isOutgoingCall = [callEvent.from, callEvent.callerPn].some(
+        (identityJid) => isSessionIdentityJid(session, identityJid),
+      );
+
+      /**
+       * Kandidat JID lawan bicara, diurutkan dari yang paling dipercaya. Saat
+       * kita yang menelepon, lawan bicara adalah chat tujuan (`chatId`); saat
+       * menerima, lawan bicara adalah si penelepon.
+       */
+      const counterpartCandidates = (
+        callEvent.isGroup
+          ? [rawConversationJid]
+          : isOutgoingCall
+            ? [callEvent.chatId]
+            : [callEvent.callerPn, callEvent.from, callEvent.chatId]
+      ).filter(Boolean);
+
+      const counterpartJid = counterpartCandidates[0] || rawConversationJid;
+      const counterpartPhoneJid = counterpartCandidates.find((candidateJid) =>
+        candidateJid.endsWith("@s.whatsapp.net"),
+      );
+
+      let conversationJid = counterpartJid;
       let callerSessionEntry = null;
       const isSelfConversation =
-        !callEvent.isGroup && isSessionIdentityJid(session, rawConversationJid);
+        !callEvent.isGroup && isSessionIdentityJid(session, counterpartJid);
 
       if (isSelfConversation) {
         conversationJid = toWhatsappJid(session?.phoneNumber || "");
       } else if (!callEvent.isGroup) {
-        const participantJids = [rawConversationJid, callEvent.from].filter(
-          Boolean,
-        );
-
         callerSessionEntry = findConnectedSessionByJids(
-          participantJids,
+          counterpartCandidates,
           sessionId,
         );
 
@@ -769,7 +829,7 @@ const createCallHandler = (sessionId) => {
 
           conversationJid = toWhatsappJid(callerSession.phoneNumber);
 
-          for (const participantJid of participantJids) {
+          for (const participantJid of counterpartCandidates) {
             if (participantJid.endsWith("@lid")) {
               await registerJidAlias(
                 sessionId,
@@ -780,23 +840,37 @@ const createCallHandler = (sessionId) => {
             }
           }
         } else {
+          /**
+           * Seluruh kandidat merujuk lawan bicara yang sama, jadi LID di
+           * antaranya aman dipetakan ke nomor aslinya. Alias ini membuat
+           * panggilan berikutnya langsung jatuh ke percakapan yang benar.
+           */
+          if (counterpartPhoneJid) {
+            for (const participantJid of counterpartCandidates) {
+              if (participantJid.endsWith("@lid")) {
+                await registerJidAlias(
+                  sessionId,
+                  normalizeIdentityJid(participantJid),
+                  counterpartPhoneJid,
+                );
+              }
+            }
+          }
+
           const locallyResolvedJid = resolveCanonicalJid({
-            remoteJid: rawConversationJid,
+            remoteJid: counterpartJid,
           });
 
-          conversationJid = await resolveStoredCanonicalJid(
-            sessionId,
-            locallyResolvedJid,
-          );
-
-          if (!conversationJid.endsWith("@s.whatsapp.net")) {
-            logger.warn(
-              { sessionId, callId: callEvent.id, participantJids },
-              "Call diabaikan karena identitas peserta belum dapat diresolusi",
-            );
-
-            continue;
-          }
+          /**
+           * Panggilan tetap dicatat walau identitas belum bisa diresolusi ke
+           * nomor telepon: percakapan memakai JID LID apa adanya dan akan
+           * digabung otomatis begitu alias kontaknya tersinkron. Sebelumnya
+           * panggilan seperti ini dibuang diam-diam, yang membuat riwayat
+           * panggilan keluar tidak pernah muncul.
+           */
+          conversationJid =
+            counterpartPhoneJid ||
+            (await resolveStoredCanonicalJid(sessionId, locallyResolvedJid));
         }
       }
 
@@ -831,27 +905,28 @@ const createCallHandler = (sessionId) => {
       } else {
         const contactNames = await getContactNames(sessionId, [
           conversationJid,
+          counterpartJid,
           rawConversationJid,
         ]);
 
         conversationName = isSelfConversation
           ? session?.name || ""
           : contactNames.get(conversationJid) ||
+            contactNames.get(counterpartJid) ||
             contactNames.get(rawConversationJid) ||
             "";
       }
 
       const sessionUserJid = toWhatsappJid(session?.phoneNumber || "");
-      const canonicalCallerJid = isSelfConversation
+      const isFromMe = isSelfConversation || isOutgoingCall;
+      const canonicalCallerJid = isFromMe
         ? sessionUserJid
         : callerSessionEntry
           ? toWhatsappJid(callerSessionEntry[1].phoneNumber)
           : await resolveStoredCanonicalJid(
               sessionId,
-              callEvent.from || conversationJid,
+              callEvent.callerPn || callEvent.from || conversationJid,
             );
-      const isFromMe =
-        isSelfConversation || (!callEvent.isGroup && !callerSessionEntry);
       const call = {
         id: callEvent.id,
         status: callEvent.status,
@@ -898,13 +973,20 @@ const createCallHandler = (sessionId) => {
           }
         }
 
+        /**
+         * Salinan untuk sesi lawan bicara yang juga dikelola service ini.
+         * Arahnya selalu kebalikan dari catatan sesi ini: panggilan yang kita
+         * terima berarti panggilan keluar bagi mereka, dan sebaliknya.
+         */
         const callerChatMessage = {
           ...chatMessage,
           jid: receiverJid,
-          sender: callerSession.phoneNumber,
-          name: "",
+          sender: isFromMe
+            ? session?.phoneNumber || ""
+            : callerSession.phoneNumber,
+          name: isFromMe ? receiverName : "",
           conversationName: receiverName,
-          fromMe: true,
+          fromMe: !isFromMe,
         };
 
         await addChatMessage(callerSessionId, receiverJid, callerChatMessage);

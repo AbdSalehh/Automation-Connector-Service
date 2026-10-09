@@ -17,6 +17,7 @@ import {
   handleListStories,
   handleMarkStoryViewed,
 } from "../controllers/story.controller.js";
+import { handleListTodayCalls } from "../controllers/call.controller.js";
 import { cleanupExpiredInboundMedia } from "../services/media.service.js";
 import { sendSuccess } from "../lib/apiResponse.js";
 
@@ -70,6 +71,13 @@ chatRouter.delete(
   ownerAuth,
   requireOwnedSession,
   handleRemoveExcludedChat,
+);
+chatRouter.get(
+  "/sessions/:sessionId/calls",
+  apiKeyAuth,
+  ownerAuth,
+  requireOwnedSession,
+  handleListTodayCalls,
 );
 chatRouter.get(
   "/sessions/:sessionId/stories",
