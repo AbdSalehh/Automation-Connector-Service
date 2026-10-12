@@ -1,3 +1,5 @@
+import { createSerialQueue } from "./serialQueue.js";
+
 /**
  * Penyadap riwayat panggilan dari mutasi app-state WhatsApp.
  *
@@ -29,6 +31,17 @@ const SYNC_ACTION_LOG_MESSAGE = "processing sync action";
 export const createCallLogTappedLogger = (baseLogger, onCallLogRecord) => {
   const tappedLogger = Object.create(baseLogger);
 
+  /**
+   * Sinkronisasi app-state awal dapat membawa puluhan riwayat panggilan
+   * sekaligus; antrean serial mencegahnya membanjiri pool koneksi database.
+   */
+  const enqueue = createSerialQueue((error) => {
+    baseLogger.error(
+      { err: error?.message },
+      "Gagal memproses riwayat panggilan dari app-state",
+    );
+  });
+
   tappedLogger.trace = function tapSyncAction(...traceArguments) {
     const [payload, message] = traceArguments;
 
@@ -43,19 +56,9 @@ export const createCallLogTappedLogger = (baseLogger, onCallLogRecord) => {
          * untuk panggilan satu lawan satu, sementara index mutasi umumnya masih
          * memuat JID lawan bicara.
          */
-        Promise.resolve()
-          .then(() =>
-            onCallLogRecord({
-              record: callLogRecord,
-              index: Array.isArray(mutation?.index) ? mutation.index : [],
-            }),
-          )
-          .catch((error) => {
-            baseLogger.error(
-              { err: error?.message },
-              "Gagal memproses riwayat panggilan dari app-state",
-            );
-          });
+        const index = Array.isArray(mutation?.index) ? mutation.index : [];
+
+        enqueue(() => onCallLogRecord({ record: callLogRecord, index }));
       }
     }
 

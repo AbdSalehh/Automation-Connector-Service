@@ -32,6 +32,7 @@ import {
   clearSessionChatCache,
   findCallMessageId,
   getContactNames,
+  isViewOncePlaceholderStored,
   resolveContactNames,
   messageExists,
   registerJidAlias,
@@ -46,6 +47,7 @@ import {
 } from "./story.store.js";
 import { isChatExcluded } from "./excludedChat.store.js";
 import { createCallLogTappedLogger } from "../lib/callLogTap.js";
+import { createSerialQueue } from "../lib/serialQueue.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -514,184 +516,44 @@ const resolveConversationName = async (socket, remoteJid, contactNames) => {
 };
 
 const createIncomingMessageHandler = (sessionId) => {
-  return async ({ messages, type }) => {
-    if (type !== "notify") {
+  /**
+   * Memproses satu pesan masuk. Dipisah dari loop agar kegagalan pada satu
+   * pesan (mis. database sesaat tidak tersedia) hanya melewatkan pesan itu,
+   * bukan seluruh sisa batch.
+   */
+  const processIncomingMessage = async (incomingMessage) => {
+    /**
+     * WhatsApp TIDAK mengirim isi media sekali lihat ke perangkat tertaut:
+     * yang tiba hanya node `<unavailable type="view_once">` tanpa konten
+     * terenkripsi. Baileys menandainya `key.isViewOnce` dengan
+     * `message: null`. Stub ini tetap diproses sebagai placeholder agar
+     * pesannya muncul di linimasa chat, bukan hilang tanpa jejak.
+     */
+    const isViewOncePlaceholder =
+      !incomingMessage.message && Boolean(incomingMessage.key?.isViewOnce);
+
+    if (!incomingMessage.message && !isViewOncePlaceholder) {
       return;
     }
 
-    for (const incomingMessage of messages) {
+    const remoteJid = incomingMessage.key.remoteJid || "";
+
+    if (remoteJid === "status@broadcast") {
       if (!incomingMessage.message) {
-        continue;
+        return;
       }
 
-      const remoteJid = incomingMessage.key.remoteJid || "";
-
-      if (remoteJid === "status@broadcast") {
-        const messageContent = unwrapMessage(incomingMessage.message);
-        const messageType = detectMessageType(messageContent);
-        const messageText = extractMessageText(incomingMessage.message);
-        const senderJid =
-          incomingMessage.key.participantPn ||
-          incomingMessage.key.participant ||
-          incomingMessage.key.remoteJidAlt ||
-          "";
-
-        if (!incomingMessage.key.id || !senderJid) {
-          continue;
-        }
-
-        const isDownloadableMedia = [
-          "image",
-          "video",
-          "audio",
-          "document",
-          "sticker",
-        ].includes(messageType);
-        const sharedMessageData = extractSharedMessageData(
-          messageContent,
-          messageType,
-        );
-
-        if (!messageText && !isDownloadableMedia && !sharedMessageData) {
-          continue;
-        }
-
-        const isAlreadyStored = await messageExists(
-          sessionId,
-          incomingMessage.key.id,
-        );
-        /**
-         * Story membawa LID (`participant`) dan nomor telepon (`participantPn`)
-         * sekaligus. Pasangan ini didaftarkan sebagai alias agar nama kontak
-         * yang tersimpan di bawah salah satu varian bisa ditemukan dari varian
-         * lainnya.
-         */
-        const storyLidJid = [
-          incomingMessage.key.participant,
-          incomingMessage.key.remoteJidAlt,
-        ].find((jid) => jid?.endsWith("@lid"));
-        const storyPhoneJid = [
-          incomingMessage.key.participantPn,
-          incomingMessage.key.participant,
-          incomingMessage.key.remoteJidAlt,
-        ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
-
-        if (storyLidJid && storyPhoneJid) {
-          await registerJidAlias(sessionId, storyLidJid, storyPhoneJid);
-        }
-
-        /**
-         * Nama awal memakai resolver yang sama dengan daftar percakapan, lalu
-         * `pushName` (username) hanya sebagai cadangan. Nama final tetap
-         * diselesaikan ulang saat story dibaca.
-         */
-        const contactNames = await resolveContactNames(sessionId, [senderJid]);
-        const senderName =
-          contactNames.get(senderJid) || incomingMessage.pushName || "";
-        const media = isAlreadyStored
-          ? undefined
-          : isDownloadableMedia
-            ? await downloadAndUploadMedia(
-                incomingMessage,
-                messageContent,
-                messageType,
-                sessionId,
-              )
-            : sharedMessageData;
-        const sentAt = new Date(
-          convertUnixToIso(incomingMessage.messageTimestamp),
-        );
-
-        await upsertStory(sessionId, {
-          whatsappId: incomingMessage.key.id,
-          senderJid,
-          senderName,
-          messageType,
-          message: messageText,
-          media,
-          fromMe: Boolean(incomingMessage.key.fromMe),
-          sentAt,
-          expiresAt: new Date(sentAt.getTime() + 24 * 60 * 60 * 1000),
-        });
-
-        continue;
-      }
-
-      const isFromMe = Boolean(incomingMessage.key.fromMe);
-
-      /**
-       * Pesan fromMe (dikirim dari HP, bukan dari API ini) tidak punya
-       * `senderPn`/`participantPn`; nomor lawan bicara diambil dari
-       * `remoteJid` itu sendiri.
-       */
-      const sender = isFromMe
-        ? extractNumberFromJid(remoteJid)
-        : resolveSenderNumber(incomingMessage.key);
-      const messageText = extractMessageText(incomingMessage.message);
       const messageContent = unwrapMessage(incomingMessage.message);
-      const mentionJids = extractMentionJids(incomingMessage.message);
-      const session = sessions.get(sessionId);
-      const sessionUserJid = session?.phoneNumber
-        ? toWhatsappJid(session.phoneNumber)
-        : "";
-      const messageIdentityJids = [remoteJid, incomingMessage.key.remoteJidAlt];
-      const isSelfConversation =
-        !remoteJid.endsWith("@g.us") &&
-        messageIdentityJids.some((identityJid) =>
-          isSessionIdentityJid(session, identityJid),
-        );
-      const resolvedMessageJid = isSelfConversation
-        ? sessionUserJid
-        : resolveCanonicalJid(incomingMessage.key);
-      const alternatePhoneJid = [
-        incomingMessage.key.remoteJidAlt,
-        incomingMessage.key.senderPn,
-        incomingMessage.key.participantPn,
-      ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
-
-      const senderJid =
-        incomingMessage.key.participant ||
-        incomingMessage.key.participantPn ||
-        remoteJid;
-
-      const canonicalSenderJid = await resolveStoredCanonicalJid(
-        sessionId,
-        senderJid,
-      );
-
-      const conversationJid = isSelfConversation
-        ? sessionUserJid
-        : await resolveStoredCanonicalJid(sessionId, resolvedMessageJid);
-
-      const contactNames = await getContactNames(sessionId, [
-        senderJid,
-        canonicalSenderJid,
-        remoteJid,
-        conversationJid,
-        resolvedMessageJid,
-        alternatePhoneJid,
-        ...mentionJids,
-      ]);
-
-      const senderName =
-        contactNames.get(senderJid) ||
-        contactNames.get(canonicalSenderJid) ||
-        incomingMessage.pushName ||
-        "";
-      const mentions = resolveMentions(mentionJids, contactNames);
-
       const messageType = detectMessageType(messageContent);
+      const messageText = extractMessageText(incomingMessage.message);
+      const senderJid =
+        incomingMessage.key.participantPn ||
+        incomingMessage.key.participant ||
+        incomingMessage.key.remoteJidAlt ||
+        "";
 
-      if (isViewOnceMessage(incomingMessage.message)) {
-        logger.info(
-          {
-            sessionId,
-            messageType,
-            isFromMe,
-            contentKeys: Object.keys(messageContent || {}),
-          },
-          "Pesan sekali lihat diterima, ditampilkan sebagai pesan biasa",
-        );
+      if (!incomingMessage.key.id || !senderJid) {
+        return;
       }
 
       const isDownloadableMedia = [
@@ -705,117 +567,311 @@ const createIncomingMessageHandler = (sessionId) => {
         messageContent,
         messageType,
       );
-      const replyTo = extractReplyContext(incomingMessage.message);
 
-      if (
-        !isSelfConversation &&
-        remoteJid.endsWith("@lid") &&
-        alternatePhoneJid
-      ) {
-        await registerJidAlias(
-          sessionId,
-          remoteJid,
-          alternatePhoneJid,
-          isFromMe ? "" : senderName,
-        );
-      }
-
-      const conversationName = isSelfConversation
-        ? session?.name || ""
-        : remoteJid.endsWith("@g.us")
-          ? await resolveConversationName(session?.socket, remoteJid)
-          : contactNames.get(conversationJid) ||
-            contactNames.get(resolvedMessageJid) ||
-            contactNames.get(alternatePhoneJid) ||
-            contactNames.get(remoteJid) ||
-            (isFromMe ? "" : senderName);
-
-      /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
       if (!messageText && !isDownloadableMedia && !sharedMessageData) {
-        continue;
+        return;
       }
-
-      /**
-       * Nomor pengirim bisa tidak teresolusi bila remoteJid berupa `@lid`
-       * dan kontaknya belum tersinkron dengan `senderPn`. Pesan tetap
-       * disimpan ke cache (percakapan tetap muncul), hanya webhook yang
-       * dilewati karena butuh nomor tujuan balasan yang valid.
-       */
-      if (!sender) {
-        logger.warn(
-          { sessionId, remoteJid },
-          "Nomor pengirim tidak dapat diresolusi dari LID, webhook dilewati",
-        );
-      }
-
-      logger.info(
-        { sessionId, sender, messageType, isFromMe },
-        "Pesan WhatsApp diterima",
-      );
 
       const isAlreadyStored = await messageExists(
         sessionId,
         incomingMessage.key.id,
       );
-      const isExcludedChat = await isChatExcluded(sessionId, conversationJid);
-      const media =
-        isAlreadyStored || isExcludedChat
-          ? undefined
-          : isDownloadableMedia
-            ? await downloadAndUploadMedia(
-                incomingMessage,
-                messageContent,
-                messageType,
-                sessionId,
-              )
-            : sharedMessageData;
-
-      const chatMessage = {
-        id: incomingMessage.key.id,
-        jid: conversationJid,
-        sender: isSelfConversation ? session?.phoneNumber || sender : sender,
-        message: messageText,
-        name: isSelfConversation ? session?.name || "" : senderName,
-        conversationName,
-        messageType,
-        media,
-        replyTo,
-        mentions,
-        fromMe: isFromMe,
-        sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
-        receivedAt: new Date().toISOString(),
-      };
-
       /**
-       * Chat tersembunyi tidak disimpan ke cache maupun dipublikasikan
-       * realtime agar tidak muncul di daftar dan tidak memakai storage,
-       * namun webhook di bawah tetap jalan untuk automation.
+       * Story membawa LID (`participant`) dan nomor telepon (`participantPn`)
+       * sekaligus. Pasangan ini didaftarkan sebagai alias agar nama kontak
+       * yang tersimpan di bawah salah satu varian bisa ditemukan dari varian
+       * lainnya.
        */
-      if (!isExcludedChat) {
-        await addChatMessage(sessionId, conversationJid, chatMessage);
+      const storyLidJid = [
+        incomingMessage.key.participant,
+        incomingMessage.key.remoteJidAlt,
+      ].find((jid) => jid?.endsWith("@lid"));
+      const storyPhoneJid = [
+        incomingMessage.key.participantPn,
+        incomingMessage.key.participant,
+        incomingMessage.key.remoteJidAlt,
+      ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
 
-        await publishChatUpdate(sessionId, chatMessage);
+      if (storyLidJid && storyPhoneJid) {
+        await registerJidAlias(sessionId, storyLidJid, storyPhoneJid);
       }
 
       /**
-       * Webhook engine (menggerakkan workflow) hanya dipicu untuk pesan
-       * masuk yang bukan fromMe dan punya sender valid, agar tidak
-       * memicu balasan otomatis atas pesan yang kita kirim sendiri.
+       * Nama awal memakai resolver yang sama dengan daftar percakapan, lalu
+       * `pushName` (username) hanya sebagai cadangan. Nama final tetap
+       * diselesaikan ulang saat story dibaca.
        */
-      if (!isFromMe && sender) {
-        const inboundPayload = {
-          sessionId,
-          sender,
-          message: messageText,
-          name: senderName,
-          messageType,
-          media,
-          sentAt: chatMessage.sentAt,
-          receivedAt: chatMessage.receivedAt,
-        };
+      const contactNames = await resolveContactNames(sessionId, [senderJid]);
+      const senderName =
+        contactNames.get(senderJid) || incomingMessage.pushName || "";
+      const media = isAlreadyStored
+        ? undefined
+        : isDownloadableMedia
+          ? await downloadAndUploadMedia(
+              incomingMessage,
+              messageContent,
+              messageType,
+              sessionId,
+            )
+          : sharedMessageData;
+      const sentAt = new Date(
+        convertUnixToIso(incomingMessage.messageTimestamp),
+      );
 
-        await forwardInboundMessage(inboundPayload);
-        await publishInboundMessage(sessionId, inboundPayload);
+      await upsertStory(sessionId, {
+        whatsappId: incomingMessage.key.id,
+        senderJid,
+        senderName,
+        messageType,
+        message: messageText,
+        media,
+        fromMe: Boolean(incomingMessage.key.fromMe),
+        sentAt,
+        expiresAt: new Date(sentAt.getTime() + 24 * 60 * 60 * 1000),
+      });
+
+      return;
+    }
+
+    const isFromMe = Boolean(incomingMessage.key.fromMe);
+
+    /**
+     * Pesan fromMe (dikirim dari HP, bukan dari API ini) tidak punya
+     * `senderPn`/`participantPn`; nomor lawan bicara diambil dari
+     * `remoteJid` itu sendiri.
+     */
+    const sender = isFromMe
+      ? extractNumberFromJid(remoteJid)
+      : resolveSenderNumber(incomingMessage.key);
+    const messageText = extractMessageText(incomingMessage.message);
+    const messageContent = unwrapMessage(incomingMessage.message);
+    const mentionJids = extractMentionJids(incomingMessage.message);
+    const session = sessions.get(sessionId);
+    const sessionUserJid = session?.phoneNumber
+      ? toWhatsappJid(session.phoneNumber)
+      : "";
+    const messageIdentityJids = [remoteJid, incomingMessage.key.remoteJidAlt];
+    const isSelfConversation =
+      !remoteJid.endsWith("@g.us") &&
+      messageIdentityJids.some((identityJid) =>
+        isSessionIdentityJid(session, identityJid),
+      );
+    const resolvedMessageJid = isSelfConversation
+      ? sessionUserJid
+      : resolveCanonicalJid(incomingMessage.key);
+    const alternatePhoneJid = [
+      incomingMessage.key.remoteJidAlt,
+      incomingMessage.key.senderPn,
+      incomingMessage.key.participantPn,
+    ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
+
+    const senderJid =
+      incomingMessage.key.participant ||
+      incomingMessage.key.participantPn ||
+      remoteJid;
+
+    const canonicalSenderJid = await resolveStoredCanonicalJid(
+      sessionId,
+      senderJid,
+    );
+
+    const conversationJid = isSelfConversation
+      ? sessionUserJid
+      : await resolveStoredCanonicalJid(sessionId, resolvedMessageJid);
+
+    const contactNames = await getContactNames(sessionId, [
+      senderJid,
+      canonicalSenderJid,
+      remoteJid,
+      conversationJid,
+      resolvedMessageJid,
+      alternatePhoneJid,
+      ...mentionJids,
+    ]);
+
+    const senderName =
+      contactNames.get(senderJid) ||
+      contactNames.get(canonicalSenderJid) ||
+      incomingMessage.pushName ||
+      "";
+    const mentions = resolveMentions(mentionJids, contactNames);
+
+    const messageType = isViewOncePlaceholder
+      ? "view_once"
+      : detectMessageType(messageContent);
+
+    if (isViewOnceMessage(incomingMessage.message)) {
+      logger.info(
+        {
+          sessionId,
+          messageType,
+          isFromMe,
+          contentKeys: Object.keys(messageContent || {}),
+        },
+        "Pesan sekali lihat diterima, ditampilkan sebagai pesan biasa",
+      );
+    }
+
+    const isDownloadableMedia = [
+      "image",
+      "video",
+      "audio",
+      "document",
+      "sticker",
+    ].includes(messageType);
+    const sharedMessageData = extractSharedMessageData(
+      messageContent,
+      messageType,
+    );
+    const replyTo = extractReplyContext(incomingMessage.message);
+
+    if (
+      !isSelfConversation &&
+      remoteJid.endsWith("@lid") &&
+      alternatePhoneJid
+    ) {
+      await registerJidAlias(
+        sessionId,
+        remoteJid,
+        alternatePhoneJid,
+        isFromMe ? "" : senderName,
+      );
+    }
+
+    const conversationName = isSelfConversation
+      ? session?.name || ""
+      : remoteJid.endsWith("@g.us")
+        ? await resolveConversationName(session?.socket, remoteJid)
+        : contactNames.get(conversationJid) ||
+          contactNames.get(resolvedMessageJid) ||
+          contactNames.get(alternatePhoneJid) ||
+          contactNames.get(remoteJid) ||
+          (isFromMe ? "" : senderName);
+
+    /** Lewati hanya bila benar-benar kosong: tanpa teks dan bukan media. */
+    if (
+      !messageText &&
+      !isDownloadableMedia &&
+      !sharedMessageData &&
+      !isViewOncePlaceholder
+    ) {
+      return;
+    }
+
+    /**
+     * Nomor pengirim bisa tidak teresolusi bila remoteJid berupa `@lid`
+     * dan kontaknya belum tersinkron dengan `senderPn`. Pesan tetap
+     * disimpan ke cache (percakapan tetap muncul), hanya webhook yang
+     * dilewati karena butuh nomor tujuan balasan yang valid.
+     */
+    if (!sender) {
+      logger.warn(
+        { sessionId, remoteJid },
+        "Nomor pengirim tidak dapat diresolusi dari LID, webhook dilewati",
+      );
+    }
+
+    logger.info(
+      { sessionId, sender, messageType, isFromMe },
+      "Pesan WhatsApp diterima",
+    );
+
+    /**
+     * Baileys meminta ponsel mengirim ulang isi pesan yang tiba tanpa konten
+     * (placeholder resend). Bila ponsel mengabulkannya, pesan yang sama tiba
+     * lagi dengan isi lengkap. Baris placeholder yang sudah tersimpan tidak
+     * boleh menghalangi unduhan media aslinya.
+     */
+    const isAlreadyStored =
+      (await messageExists(sessionId, incomingMessage.key.id)) &&
+      !(await isViewOncePlaceholderStored(sessionId, incomingMessage.key.id));
+    const isExcludedChat = await isChatExcluded(sessionId, conversationJid);
+    const media = isViewOncePlaceholder
+      ? {
+          url: "",
+          mimetype: "",
+          fileName: "",
+          fileLength: 0,
+          unavailable: true,
+          reason: "view_once",
+        }
+      : isAlreadyStored || isExcludedChat
+        ? undefined
+        : isDownloadableMedia
+          ? await downloadAndUploadMedia(
+              incomingMessage,
+              messageContent,
+              messageType,
+              sessionId,
+            )
+          : sharedMessageData;
+
+    const chatMessage = {
+      id: incomingMessage.key.id,
+      jid: conversationJid,
+      sender: isSelfConversation ? session?.phoneNumber || sender : sender,
+      message: messageText,
+      name: isSelfConversation ? session?.name || "" : senderName,
+      conversationName,
+      messageType,
+      media,
+      replyTo,
+      mentions,
+      fromMe: isFromMe,
+      sentAt: convertUnixToIso(incomingMessage.messageTimestamp),
+      receivedAt: new Date().toISOString(),
+    };
+
+    /**
+     * Chat tersembunyi tidak disimpan ke cache maupun dipublikasikan
+     * realtime agar tidak muncul di daftar dan tidak memakai storage,
+     * namun webhook di bawah tetap jalan untuk automation.
+     */
+    if (!isExcludedChat) {
+      await addChatMessage(sessionId, conversationJid, chatMessage);
+
+      await publishChatUpdate(sessionId, chatMessage);
+    }
+
+    /**
+     * Webhook engine (menggerakkan workflow) hanya dipicu untuk pesan
+     * masuk yang bukan fromMe dan punya sender valid, agar tidak
+     * memicu balasan otomatis atas pesan yang kita kirim sendiri.
+     */
+    if (!isFromMe && sender && !isViewOncePlaceholder) {
+      const inboundPayload = {
+        sessionId,
+        sender,
+        message: messageText,
+        name: senderName,
+        messageType,
+        media,
+        sentAt: chatMessage.sentAt,
+        receivedAt: chatMessage.receivedAt,
+      };
+
+      await forwardInboundMessage(inboundPayload);
+      await publishInboundMessage(sessionId, inboundPayload);
+    }
+  };
+
+  return async ({ messages, type }) => {
+    if (type !== "notify") {
+      return;
+    }
+
+    for (const incomingMessage of messages) {
+      try {
+        await processIncomingMessage(incomingMessage);
+      } catch (error) {
+        logger.error(
+          {
+            err: error?.message,
+            sessionId,
+            messageId: incomingMessage?.key?.id,
+          },
+          "Gagal memproses pesan masuk, pesan dilewati",
+        );
       }
     }
   };
@@ -1692,6 +1748,24 @@ export const cancelDuplicateSession = async (sessionId) => {
 };
 
 /**
+ * Membuat pembungkus handler yang menjalankan event secara berurutan melalui
+ * satu antrean serial. Handler yang dibungkus dengan pembungkus yang sama
+ * berbagi antrean yang sama.
+ */
+const createSessionEventQueue = (sessionId, queueName) => {
+  const enqueue = createSerialQueue((error) => {
+    logger.error(
+      { err: error?.message, sessionId, queueName },
+      "Handler event WhatsApp gagal, event dilewati",
+    );
+  });
+
+  return (handler) => (payload) => {
+    enqueue(() => handler(payload));
+  };
+};
+
+/**
  * Membuat atau memulai ulang sebuah sesi WhatsApp berdasarkan sessionId.
  * Sesi disimpan persisten di folder masing-masing sehingga restart
  * kontainer tidak memaksa logout.
@@ -1748,21 +1822,46 @@ export const startSession = async (sessionId) => {
       ].filter(Boolean),
     });
 
+    /**
+     * Setiap kelompok event diproses lewat antrean serialnya sendiri. Antrean
+     * membatasi jumlah query bersamaan per sesi (mencegah pool koneksi habis
+     * saat sinkronisasi awal) dan memastikan error di handler hanya dicatat,
+     * tidak menjadi unhandled rejection yang mematikan seluruh service.
+     * Kontak memakai satu antrean untuk upsert & update agar urutannya terjaga.
+     */
+    const connectionQueue = createSessionEventQueue(sessionId, "connection");
+    const messageQueue = createSessionEventQueue(sessionId, "messages");
+    const contactQueue = createSessionEventQueue(sessionId, "contacts");
+    const callQueue = createSessionEventQueue(sessionId, "calls");
+    const storyQueue = createSessionEventQueue(sessionId, "stories");
+
     socket.ev.on("creds.update", saveCreds);
     socket.ev.on(
       "connection.update",
-      createConnectionUpdateHandler(sessionId, socket),
+      connectionQueue(createConnectionUpdateHandler(sessionId, socket)),
     );
-    socket.ev.on("messages.upsert", createIncomingMessageHandler(sessionId));
-    socket.ev.on("contacts.upsert", createContactHandler(sessionId));
-    socket.ev.on("contacts.update", createContactHandler(sessionId));
-    socket.ev.on("call", createCallHandler(sessionId));
+    socket.ev.on(
+      "messages.upsert",
+      messageQueue(createIncomingMessageHandler(sessionId)),
+    );
+    socket.ev.on(
+      "contacts.upsert",
+      contactQueue(createContactHandler(sessionId)),
+    );
+    socket.ev.on(
+      "contacts.update",
+      contactQueue(createContactHandler(sessionId)),
+    );
+    socket.ev.on("call", callQueue(createCallHandler(sessionId)));
     socket.ev.on("messages.update", createMessageStatusHandler(sessionId));
     socket.ev.on(
       "message-receipt.update",
-      createStoryReceiptHandler(sessionId),
+      storyQueue(createStoryReceiptHandler(sessionId)),
     );
-    socket.ev.on("messages.reaction", createStoryReactionHandler(sessionId));
+    socket.ev.on(
+      "messages.reaction",
+      storyQueue(createStoryReactionHandler(sessionId)),
+    );
 
     return socket;
   } finally {

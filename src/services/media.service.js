@@ -1,10 +1,18 @@
 import crypto from "node:crypto";
-import path from "node:path";
 
 import { v2 as cloudinary } from "cloudinary";
 
 import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
+import {
+  resolveFileExtension,
+  sanitizeFileBaseName,
+} from "../lib/mediaFileName.js";
+import {
+  cleanupExpiredR2Media,
+  isR2Configured,
+  uploadToR2,
+} from "./r2.storage.js";
 
 /**
  * Menandai apakah Cloudinary sudah dikonfigurasi sekali saja, agar inisialisasi
@@ -68,42 +76,6 @@ export const extractCloudName = (mediaUrl) => {
 };
 
 /**
- * Ekstensi cadangan per mimetype, dipakai saat WhatsApp mengirim dokumen tanpa
- * nama berkas. Cloudinary menyimpan berkas `raw` apa adanya, sehingga tanpa
- * ekstensi pada public_id berkas diserahkan sebagai `application/octet-stream`
- * dan gagal dibuka/diunduh di browser.
- */
-const EXTENSION_BY_MIMETYPE = {
-  "application/pdf": ".pdf",
-  "application/msword": ".doc",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-    ".docx",
-  "application/vnd.ms-excel": ".xls",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-  "application/vnd.ms-powerpoint": ".ppt",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-    ".pptx",
-  "application/zip": ".zip",
-  "text/plain": ".txt",
-  "text/csv": ".csv",
-};
-
-/**
- * Membersihkan nama berkas menjadi public_id yang aman untuk Cloudinary:
- * hanya huruf, angka, strip, dan garis bawah. Mengembalikan "dokumen" bila
- * tidak ada karakter yang tersisa.
- */
-const sanitizeFileBaseName = (fileName) => {
-  const baseName = path
-    .basename(fileName || "", path.extname(fileName || ""))
-    .replace(/[^a-zA-Z0-9-_]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
-
-  return baseName || "dokumen";
-};
-
-/**
  * Menyusun public_id untuk berkas `raw` secara eksplisit, lengkap dengan
  * ekstensi di bagian akhir. Cloudinary menambahkan sufiks acak SETELAH
  * public_id ketika `use_filename` aktif, sehingga "laporan.pdf" bisa menjadi
@@ -111,8 +83,7 @@ const sanitizeFileBaseName = (fileName) => {
  * hal itu sekaligus tetap menjamin keunikan.
  */
 const buildRawPublicId = (fileName, mimetype) => {
-  const extension =
-    path.extname(fileName || "") || EXTENSION_BY_MIMETYPE[mimetype] || "";
+  const extension = resolveFileExtension(fileName, mimetype);
 
   const uniqueSuffix = crypto.randomBytes(6).toString("hex");
 
@@ -204,6 +175,47 @@ const resolveUploadOptions = (messageType, fileName, mimetype) => {
 };
 
 /**
+ * Jalur unggah Cloudflare R2. Bersifat best-effort seperti jalur Cloudinary:
+ * kegagalan dicatat dan mengembalikan null agar teks/caption tetap diteruskan.
+ */
+const uploadInboundMediaToR2 = async (
+  buffer,
+  { mimetype, fileName, messageType, sessionId },
+) => {
+  if (!isR2Configured()) {
+    logger.warn(
+      { sessionId },
+      "Lewati upload media karena konfigurasi R2 belum lengkap",
+    );
+
+    return null;
+  }
+
+  try {
+    const uploadedMedia = await uploadToR2(buffer, {
+      mimetype,
+      fileName,
+      messageType,
+      sessionId,
+    });
+
+    logger.info(
+      { sessionId, messageType, bytes: buffer.length },
+      "Media masuk berhasil diunggah ke Cloudflare R2",
+    );
+
+    return uploadedMedia;
+  } catch (error) {
+    logger.error(
+      { err: error?.message, sessionId },
+      "Gagal mengunggah media masuk ke Cloudflare R2",
+    );
+
+    return null;
+  }
+};
+
+/**
  * Mengunggah buffer media masuk ke Cloudinary lalu mengembalikan URL HTTPS
  * (CDN). Bersifat best-effort: bila Cloudinary belum dikonfigurasi atau upload
  * gagal, mengembalikan null dan mencatat log, tanpa melempar error agar
@@ -213,6 +225,24 @@ export const uploadInboundMedia = async (
   buffer,
   { mimetype, fileName, messageType, sessionId },
 ) => {
+  if (env.storageProvider === "r2") {
+    return uploadInboundMediaToR2(buffer, {
+      mimetype,
+      fileName,
+      messageType,
+      sessionId,
+    });
+  }
+
+  if (env.storageProvider !== "cloudinary") {
+    logger.warn(
+      { sessionId, storageProvider: env.storageProvider },
+      "Lewati upload media karena STORAGE_PROVIDER tidak dikenal",
+    );
+
+    return null;
+  }
+
   if (!ensureCloudinaryReady()) {
     logger.warn(
       { sessionId },
@@ -308,13 +338,32 @@ const listExpiredResources = async (resourceType, cutoffDate) => {
 };
 
 export const cleanupExpiredInboundMedia = async () => {
+  const cutoffDate = new Date(
+    Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  );
+
+  if (env.storageProvider === "r2") {
+    if (!isR2Configured()) {
+      throw new Error("Konfigurasi R2 belum lengkap");
+    }
+
+    const { inspectedCount, deletedCount } =
+      await cleanupExpiredR2Media(cutoffDate);
+
+    return {
+      storageProvider: "r2",
+      folder: INBOUND_MEDIA_FOLDER,
+      retentionDays: RETENTION_DAYS,
+      cutoffDate: cutoffDate.toISOString(),
+      deletedCount,
+      inspectedCount,
+    };
+  }
+
   if (!ensureCloudinaryReady()) {
     throw new Error("CLOUDINARY_URL belum diatur");
   }
 
-  const cutoffDate = new Date(
-    Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000,
-  );
   let deletedCount = 0;
   const inspectedByType = {};
 
@@ -350,6 +399,7 @@ export const cleanupExpiredInboundMedia = async () => {
   );
 
   return {
+    storageProvider: "cloudinary",
     folder: INBOUND_MEDIA_FOLDER,
     retentionDays: RETENTION_DAYS,
     cutoffDate: cutoffDate.toISOString(),

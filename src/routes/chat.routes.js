@@ -100,7 +100,7 @@ chatRouter.post(
     const result = await cleanupExpiredInboundMedia();
 
     return sendSuccess(response, {
-      message: "Cleanup media Cloudinary selesai",
+      message: "Cleanup media selesai",
       data: result,
     });
   },

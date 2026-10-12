@@ -321,6 +321,9 @@ export const updateConversationName = async (sessionId, jid, name) => {
   });
 };
 
+/** Jumlah upsert kontak per transaksi saat sinkronisasi buku kontak. */
+const CONTACT_UPSERT_BATCH_SIZE = 100;
+
 /**
  * Menyimpan nama kontak. Entri bertanda `isFallbackName` berasal dari username
  * WhatsApp (`notify`), bukan dari buku kontak perangkat utama, sehingga hanya
@@ -332,21 +335,39 @@ export const upsertContactNames = async (sessionId, contacts) => {
     (contact) => contact.jid && contact.name?.trim(),
   );
 
-  await Promise.all(
-    validContacts.map((contact) =>
-      prisma.whatsappContact.upsert({
-        where: {
-          sessionId_jid: { sessionId, jid: contact.jid },
-        },
-        create: {
-          sessionId,
-          jid: contact.jid,
-          name: contact.name.trim(),
-        },
-        update: contact.isFallbackName ? {} : { name: contact.name.trim() },
-      }),
-    ),
-  );
+  /**
+   * Sinkronisasi awal membawa seluruh buku kontak (ratusan hingga ribuan
+   * entri, dikali tiap varian JID). Menembakkan semuanya sekaligus lewat
+   * `Promise.all` menghabiskan pool koneksi dan membuat query lain gagal
+   * (P2024). Upsert dikelompokkan dalam transaksi berukuran tetap dan
+   * dijalankan berurutan, sehingga hanya memakai satu koneksi dalam satu waktu.
+   */
+  for (
+    let batchStart = 0;
+    batchStart < validContacts.length;
+    batchStart += CONTACT_UPSERT_BATCH_SIZE
+  ) {
+    const contactBatch = validContacts.slice(
+      batchStart,
+      batchStart + CONTACT_UPSERT_BATCH_SIZE,
+    );
+
+    await prisma.$transaction(
+      contactBatch.map((contact) =>
+        prisma.whatsappContact.upsert({
+          where: {
+            sessionId_jid: { sessionId, jid: contact.jid },
+          },
+          create: {
+            sessionId,
+            jid: contact.jid,
+            name: contact.name.trim(),
+          },
+          update: contact.isFallbackName ? {} : { name: contact.name.trim() },
+        }),
+      ),
+    );
+  }
 };
 
 export const getContactNames = async (sessionId, jids) => {
@@ -496,6 +517,21 @@ export const registerJidAlias = async (
     create: { sessionId, aliasJid, canonicalJid, name: name.trim() },
     update: { canonicalJid, ...(name.trim() ? { name: name.trim() } : {}) },
   });
+
+  /**
+   * Penggabungan percakapan hanya perlu bila ada percakapan di bawah JID LID.
+   * Pengecekan murah ini dilakukan di luar transaksi, karena fungsi ini
+   * dipanggil untuk setiap kontak saat sinkronisasi dan transaksi interaktif
+   * menahan satu koneksi selama beberapa kali bolak-balik ke database.
+   */
+  const hasLidConversation = await prisma.whatsappConversation.findUnique({
+    where: { sessionId_jid: { sessionId, jid: aliasJid } },
+    select: { id: true },
+  });
+
+  if (!hasLidConversation) {
+    return;
+  }
 
   await prisma.$transaction(async (transaction) => {
     const sourceConversation =
@@ -656,6 +692,23 @@ export const findCallMessageId = async (sessionId, callId) => {
   });
 
   return existingMessage?.whatsappId ?? null;
+};
+
+/**
+ * True bila pesan tersimpan masih berupa placeholder sekali lihat, sehingga
+ * isi asli yang dikirim ulang ponsel boleh diunduh dan menggantikannya.
+ */
+export const isViewOncePlaceholderStored = async (sessionId, whatsappId) => {
+  if (!sessionId || !whatsappId) {
+    return false;
+  }
+
+  const storedMessage = await prisma.whatsappMessage.findUnique({
+    where: { sessionId_whatsappId: { sessionId, whatsappId } },
+    select: { messageType: true },
+  });
+
+  return storedMessage?.messageType === "view_once";
 };
 
 export const messageExists = async (sessionId, whatsappId) => {
