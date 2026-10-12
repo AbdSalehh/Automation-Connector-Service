@@ -5,6 +5,7 @@ import {
   DisconnectReason,
   fetchLatestBaileysVersion,
   downloadMediaMessage,
+  normalizeMessageContent,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import fs from "fs";
@@ -31,6 +32,7 @@ import {
   clearSessionChatCache,
   findCallMessageId,
   getContactNames,
+  resolveContactNames,
   messageExists,
   registerJidAlias,
   resolveStoredCanonicalJid,
@@ -203,33 +205,37 @@ const convertUnixToIso = (timestamp) => {
 };
 
 /**
- * Membuka lapisan pembungkus pesan WhatsApp seperti pesan sementara
- * (ephemeral) atau pesan sekali lihat (view once) agar isi pesan
- * yang sebenarnya bisa dibaca.
+ * Membuka lapisan pembungkus pesan WhatsApp (pesan sementara, sekali lihat,
+ * dokumen ber-caption, pesan yang diedit, dan sejenisnya) agar isi pesan yang
+ * sebenarnya bisa dibaca.
+ *
+ * Memakai `normalizeMessageContent` milik Baileys alih-alih daftar pembungkus
+ * sendiri. Daftar lokal sebelumnya tidak mengenal `viewOnceMessageV2Extension`
+ * (pesan suara sekali lihat) maupun `editedMessage`, sehingga pesan tersebut
+ * terbaca kosong lalu dibuang. Baileys juga memakai fungsi yang sama saat
+ * mengunduh media, jadi deteksi dan unduhan selalu sepakat soal isinya.
  */
 const unwrapMessage = (messageContent) => {
   if (!messageContent) {
     return null;
   }
 
-  if (messageContent.ephemeralMessage) {
-    return unwrapMessage(messageContent.ephemeralMessage.message);
-  }
-
-  if (messageContent.viewOnceMessage) {
-    return unwrapMessage(messageContent.viewOnceMessage.message);
-  }
-
-  if (messageContent.viewOnceMessageV2) {
-    return unwrapMessage(messageContent.viewOnceMessageV2.message);
-  }
-
-  if (messageContent.documentWithCaptionMessage) {
-    return unwrapMessage(messageContent.documentWithCaptionMessage.message);
-  }
-
-  return messageContent;
+  return normalizeMessageContent(messageContent) ?? null;
 };
+
+/**
+ * Menandai apakah sebuah pesan dibungkus sebagai pesan sekali lihat. Hanya
+ * dipakai untuk logging diagnostik; isi pesannya tetap ditampilkan sebagai
+ * pesan biasa di web.
+ */
+const isViewOnceMessage = (messageContent) =>
+  Boolean(
+    messageContent?.viewOnceMessage ||
+    messageContent?.viewOnceMessageV2 ||
+    messageContent?.viewOnceMessageV2Extension ||
+    messageContent?.ephemeralMessage?.message?.viewOnceMessage ||
+    messageContent?.ephemeralMessage?.message?.viewOnceMessageV2,
+  );
 
 /**
  * Membaca isi teks dari berbagai kemungkinan struktur pesan WhatsApp:
@@ -343,9 +349,24 @@ const downloadAndUploadMedia = async (
     mimetype: mediaInfo.mimetype,
     fileName: mediaInfo.fileName,
     fileLength: mediaInfo.fileLength,
+    isVideoNote: mediaInfo.isVideoNote,
     unavailable: true,
     reason,
   });
+
+  /**
+   * WhatsApp dapat mengirim pesan sekali lihat ke perangkat tertaut tanpa
+   * kunci media, karena isinya dimaksudkan hanya dibuka di ponsel. Percobaan
+   * unduh pasti gagal, jadi langsung dicatat sebagai tidak tersedia.
+   */
+  if (!mediaInfo.isDownloadable) {
+    logger.warn(
+      { sessionId, messageType },
+      "Media tidak membawa kunci unduhan (kemungkinan pesan sekali lihat)",
+    );
+
+    return buildUnavailableMedia("not_downloadable");
+  }
 
   if (mediaInfo.fileLength > env.mediaMaxBytes) {
     logger.warn(
@@ -396,7 +417,13 @@ const downloadAndUploadMedia = async (
         sessionId,
       });
 
-      return uploadedMedia ?? buildUnavailableMedia("upload_failed");
+      if (!uploadedMedia) {
+        return buildUnavailableMedia("upload_failed");
+      }
+
+      return mediaInfo.isVideoNote
+        ? { ...uploadedMedia, isVideoNote: true }
+        : uploadedMedia;
     } catch (error) {
       const isLastAttempt = attempt === maxAttempts;
 
@@ -534,29 +561,33 @@ const createIncomingMessageHandler = (sessionId) => {
           incomingMessage.key.id,
         );
         /**
-         * Nama kontak dicari pada seluruh varian JID pengirim sebelum jatuh ke
-         * `pushName` (username WhatsApp). Nama final tetap diselesaikan ulang
-         * saat story dibaca, sehingga kontak yang tersinkron belakangan tetap
-         * tampil dengan nama dari perangkat utama.
+         * Story membawa LID (`participant`) dan nomor telepon (`participantPn`)
+         * sekaligus. Pasangan ini didaftarkan sebagai alias agar nama kontak
+         * yang tersimpan di bawah salah satu varian bisa ditemukan dari varian
+         * lainnya.
          */
-        const senderJidVariants = [
-          senderJid,
+        const storyLidJid = [
+          incomingMessage.key.participant,
+          incomingMessage.key.remoteJidAlt,
+        ].find((jid) => jid?.endsWith("@lid"));
+        const storyPhoneJid = [
           incomingMessage.key.participantPn,
           incomingMessage.key.participant,
           incomingMessage.key.remoteJidAlt,
-          await resolveStoredCanonicalJid(sessionId, senderJid),
-        ].filter(Boolean);
+        ].find((jid) => jid?.endsWith("@s.whatsapp.net"));
 
-        const contactNames = await getContactNames(
-          sessionId,
-          senderJidVariants,
-        );
+        if (storyLidJid && storyPhoneJid) {
+          await registerJidAlias(sessionId, storyLidJid, storyPhoneJid);
+        }
+
+        /**
+         * Nama awal memakai resolver yang sama dengan daftar percakapan, lalu
+         * `pushName` (username) hanya sebagai cadangan. Nama final tetap
+         * diselesaikan ulang saat story dibaca.
+         */
+        const contactNames = await resolveContactNames(sessionId, [senderJid]);
         const senderName =
-          senderJidVariants
-            .map((variantJid) => contactNames.get(variantJid))
-            .find(Boolean) ||
-          incomingMessage.pushName ||
-          "";
+          contactNames.get(senderJid) || incomingMessage.pushName || "";
         const media = isAlreadyStored
           ? undefined
           : isDownloadableMedia
@@ -650,6 +681,19 @@ const createIncomingMessageHandler = (sessionId) => {
       const mentions = resolveMentions(mentionJids, contactNames);
 
       const messageType = detectMessageType(messageContent);
+
+      if (isViewOnceMessage(incomingMessage.message)) {
+        logger.info(
+          {
+            sessionId,
+            messageType,
+            isFromMe,
+            contentKeys: Object.keys(messageContent || {}),
+          },
+          "Pesan sekali lihat diterima, ditampilkan sebagai pesan biasa",
+        );
+      }
+
       const isDownloadableMedia = [
         "image",
         "video",
@@ -1779,6 +1823,32 @@ export const fetchProfilePicture = async (sessionId, jid) => {
     );
 
     return null;
+  }
+};
+
+/**
+ * Mengambil nama (subject) grup langsung dari WhatsApp. Dipakai untuk grup
+ * yang barisnya sudah tidak ada di cache, mis. chat grup yang disembunyikan.
+ * Mengembalikan string kosong bila sesi belum siap atau grup tak dapat diakses.
+ */
+export const fetchGroupSubject = async (sessionId, groupJid) => {
+  const session = sessions.get(sessionId);
+
+  if (!session || session.status !== "open" || !groupJid?.endsWith("@g.us")) {
+    return "";
+  }
+
+  try {
+    const metadata = await session.socket.groupMetadata(groupJid);
+
+    return metadata?.subject?.trim() || "";
+  } catch (error) {
+    logger.debug(
+      { err: error?.message, sessionId, groupJid },
+      "Nama grup tidak dapat diambil",
+    );
+
+    return "";
   }
 };
 

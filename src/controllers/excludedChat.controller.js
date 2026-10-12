@@ -4,8 +4,12 @@ import {
   addExcludedChat,
   listExcludedChats,
   removeExcludedChat,
+  updateExcludedChatName,
 } from "../services/excludedChat.store.js";
-import { getSessionStatus } from "../services/session.manager.js";
+import {
+  fetchGroupSubject,
+  getSessionStatus,
+} from "../services/session.manager.js";
 
 const CONVERSATION_JID_SUFFIXES = ["@s.whatsapp.net", "@lid", "@g.us"];
 
@@ -58,7 +62,30 @@ export const handleListExcludedChats = async (request, response) => {
     return;
   }
 
-  const excludedChats = await listExcludedChats(sessionId);
+  const storedExcludedChats = await listExcludedChats(sessionId);
+
+  /**
+   * Grup yang disembunyikan sebelum snapshot nama tersedia belum punya nama.
+   * Namanya diambil langsung dari WhatsApp lalu disimpan, sehingga pengambilan
+   * ini hanya terjadi sekali per grup.
+   */
+  const excludedChats = await Promise.all(
+    storedExcludedChats.map(async ({ hasStoredName, ...excludedChat }) => {
+      if (hasStoredName || !excludedChat.jid.endsWith("@g.us")) {
+        return excludedChat;
+      }
+
+      const groupSubject = await fetchGroupSubject(sessionId, excludedChat.jid);
+
+      if (!groupSubject) {
+        return excludedChat;
+      }
+
+      await updateExcludedChatName(sessionId, excludedChat.jid, groupSubject);
+
+      return { ...excludedChat, name: groupSubject };
+    }),
+  );
 
   return sendSuccess(response, {
     message: "Daftar chat tersembunyi berhasil diambil",

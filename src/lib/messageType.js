@@ -31,7 +31,12 @@ export const detectMessageType = (messageContent) => {
     return "image";
   }
 
-  if (messageContent.videoMessage) {
+  /**
+   * `ptvMessage` adalah video bulat singkat ("video note") yang direkam lewat
+   * tombol kamera di kolom chat. Strukturnya sama dengan `videoMessage`, jadi
+   * diperlakukan sebagai video dan ditandai `isVideoNote` di metadata media.
+   */
+  if (messageContent.videoMessage || messageContent.ptvMessage) {
     return "video";
   }
 
@@ -78,6 +83,7 @@ export const extractMediaInfo = (messageContent, messageType) => {
   const mediaContent =
     messageContent.imageMessage ||
     messageContent.videoMessage ||
+    messageContent.ptvMessage ||
     messageContent.audioMessage ||
     messageContent.documentMessage ||
     messageContent.stickerMessage;
@@ -93,5 +99,15 @@ export const extractMediaInfo = (messageContent, messageType) => {
     fileName: mediaContent.fileName || "",
     fileLength,
     resourceType: toCloudinaryResourceType(messageType),
+    isVideoNote: Boolean(messageContent.ptvMessage),
+    /**
+     * Media tanpa `url`/`directPath` tidak bisa diunduh. WhatsApp kadang
+     * mengirim pesan sekali lihat ke perangkat tertaut tanpa kunci media.
+     */
+    isDownloadable: Boolean(
+      mediaContent.url ||
+      mediaContent.directPath ||
+      mediaContent.thumbnailDirectPath,
+    ),
   };
 };

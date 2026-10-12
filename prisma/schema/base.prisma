@@ -125,6 +125,9 @@ model WhatsappExcludedChat {
   id        String   @id @default(uuid())
   sessionId String
   jid       String
+  /// Snapshot nama saat chat disembunyikan; satu-satunya sumber nama grup
+  /// karena baris percakapannya dihapus ketika disembunyikan.
+  name      String   @default("")
   createdAt DateTime @default(now())
 
   @@unique([sessionId, jid])

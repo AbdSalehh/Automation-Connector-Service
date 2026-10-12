@@ -1,7 +1,10 @@
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { extractNumberFromJid } from "../lib/phoneNumber.js";
-import { getContactNames } from "./chat.store.js";
+import {
+  resolveContactNames,
+  resolveFallbackDisplayName,
+} from "./chat.store.js";
 
 /**
  * Riwayat panggilan WhatsApp.
@@ -41,32 +44,15 @@ const getStartOfToday = () => {
 };
 
 /**
- * Menentukan nama tampilan lawan bicara. Kontak tersimpan diutamakan, lalu nama
- * percakapan, lalu nama yang menempel pada baris pesan, dan terakhir nomor
- * telepon. JID `@lid` adalah identitas internal WhatsApp sehingga tidak pernah
- * ditampilkan sebagai angka.
+ * Menentukan nama tampilan lawan bicara: buku kontak perangkat utama (resolver
+ * yang sama dengan daftar percakapan), lalu nama percakapan untuk grup, lalu
+ * nama pada baris pesan, dan terakhir nomor telepon.
  */
-const resolveCallName = (callMessage, contactNames, conversationNameByJid) => {
-  const storedName =
-    contactNames.get(callMessage.jid) ||
-    conversationNameByJid.get(callMessage.jid) ||
-    callMessage.name?.trim() ||
-    "";
-
-  if (storedName) {
-    return storedName;
-  }
-
-  if (callMessage.jid.endsWith("@g.us")) {
-    return "Grup WhatsApp";
-  }
-
-  if (callMessage.jid.endsWith("@lid")) {
-    return "Kontak WhatsApp";
-  }
-
-  return extractNumberFromJid(callMessage.jid) || "Kontak WhatsApp";
-};
+const resolveCallName = (callMessage, contactNames, conversationNameByJid) =>
+  contactNames.get(callMessage.jid) ||
+  conversationNameByJid.get(callMessage.jid) ||
+  callMessage.name?.trim() ||
+  resolveFallbackDisplayName(callMessage.jid);
 
 /**
  * Mengembalikan seluruh panggilan masuk & keluar pada hari berjalan untuk
@@ -94,7 +80,7 @@ export const listTodayCalls = async (sessionId) => {
   );
 
   const [contactNames, conversations] = await Promise.all([
-    getContactNames(sessionId, callJids),
+    resolveContactNames(sessionId, callJids),
     prisma.whatsappConversation.findMany({
       where: { sessionId, jid: { in: callJids } },
       select: { jid: true, name: true },

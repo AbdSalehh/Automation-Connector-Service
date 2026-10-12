@@ -47,19 +47,6 @@ const toDate = (value) => {
   return Number.isNaN(date.getTime()) ? new Date() : date;
 };
 
-/**
- * Fallback nama tampilan saat conversation tidak punya nama tersimpan.
- * JID `@lid` adalah identitas internal WhatsApp, bukan nomor telepon,
- * sehingga tidak boleh ditampilkan sebagai digit nomor.
- */
-const resolveDisplayName = (jid) => {
-  if (jid.endsWith("@lid")) {
-    return "Kontak WhatsApp";
-  }
-
-  return extractNumberFromJid(jid);
-};
-
 const normalizeMessage = (jid, message) => ({
   id: message.id,
   jid,
@@ -377,6 +364,107 @@ export const getContactNames = async (sessionId, jids) => {
   return new Map(contacts.map((contact) => [contact.jid, contact.name]));
 };
 
+/**
+ * Menyelesaikan nama tampilan kontak dari buku kontak perangkat utama.
+ *
+ * Satu-satunya sumber nama kontak untuk seluruh fitur (percakapan, story, chat
+ * tersembunyi, panggilan), agar nama yang sama selalu tampil di mana pun.
+ * Sebelumnya tiap fitur punya urutan pencarian sendiri sehingga story kadang
+ * menampilkan username sementara percakapan menampilkan nama kontak.
+ *
+ * WhatsApp memakai `@lid` maupun nomor telepon untuk orang yang sama, dan nama
+ * pada varian `@lid` sering berupa username (`notify`) dari sinkronisasi lama.
+ * Karena itu tiap JID dipetakan dulu ke nomor teleponnya — varian yang juga
+ * dipakai daftar percakapan — dan nama di bawah nomor telepon diutamakan.
+ *
+ * Mengembalikan Map `jid -> nama`; JID tanpa nama mendapat string kosong.
+ * JID grup diabaikan karena namanya tidak berasal dari buku kontak.
+ */
+export const resolveContactNames = async (sessionId, jids) => {
+  const uniqueJids = Array.from(
+    new Set(jids.filter((jid) => jid && !jid.endsWith("@g.us"))),
+  );
+
+  if (!sessionId || uniqueJids.length === 0) {
+    return new Map();
+  }
+
+  const aliases = await prisma.whatsappJidAlias.findMany({
+    where: {
+      sessionId,
+      OR: [
+        { aliasJid: { in: uniqueJids } },
+        { canonicalJid: { in: uniqueJids } },
+      ],
+    },
+    select: { aliasJid: true, canonicalJid: true, name: true },
+  });
+
+  const canonicalJidByLid = new Map(
+    aliases.map((alias) => [alias.aliasJid, alias.canonicalJid]),
+  );
+
+  const lidJidsByCanonical = new Map();
+  const aliasNameByJid = new Map();
+
+  for (const alias of aliases) {
+    lidJidsByCanonical.set(alias.canonicalJid, [
+      ...(lidJidsByCanonical.get(alias.canonicalJid) ?? []),
+      alias.aliasJid,
+    ]);
+
+    if (alias.name?.trim()) {
+      aliasNameByJid.set(alias.aliasJid, alias.name.trim());
+      aliasNameByJid.set(alias.canonicalJid, alias.name.trim());
+    }
+  }
+
+  /** Nomor telepon lebih dulu, lalu seluruh varian LID milik orang yang sama. */
+  const lookupOrderByJid = new Map(
+    uniqueJids.map((jid) => {
+      const phoneJid = jid.endsWith("@lid") ? canonicalJidByLid.get(jid) : jid;
+      const lidJids = phoneJid ? (lidJidsByCanonical.get(phoneJid) ?? []) : [];
+
+      return [
+        jid,
+        Array.from(new Set([phoneJid, jid, ...lidJids].filter(Boolean))),
+      ];
+    }),
+  );
+
+  const contactNames = await getContactNames(
+    sessionId,
+    [...lookupOrderByJid.values()].flat(),
+  );
+
+  return new Map(
+    uniqueJids.map((jid) => {
+      const contactName = lookupOrderByJid
+        .get(jid)
+        .map((lookupJid) => contactNames.get(lookupJid))
+        .find(Boolean);
+
+      return [jid, contactName || aliasNameByJid.get(jid) || ""];
+    }),
+  );
+};
+
+/**
+ * Nama cadangan saat kontak tidak ditemukan di buku kontak. JID `@lid` adalah
+ * identitas internal WhatsApp sehingga tidak pernah ditampilkan sebagai angka.
+ */
+export const resolveFallbackDisplayName = (jid) => {
+  if (jid.endsWith("@g.us")) {
+    return "Grup WhatsApp";
+  }
+
+  if (jid.endsWith("@lid")) {
+    return "Kontak WhatsApp";
+  }
+
+  return extractNumberFromJid(jid) || "Kontak WhatsApp";
+};
+
 export const resolveStoredCanonicalJid = async (sessionId, jid) => {
   if (!jid?.endsWith("@lid")) {
     return jid;
@@ -479,33 +567,10 @@ export const listConversations = async (sessionId, { limit, offset }) => {
     prisma.whatsappConversation.count({ where }),
   ]);
 
-  const nonGroupJids = conversations
-    .filter((conversation) => !conversation.jid.endsWith("@g.us"))
-    .map((conversation) => conversation.jid);
-
-  const lidJids = nonGroupJids.filter((jid) => jid.endsWith("@lid"));
-
-  const aliases =
-    lidJids.length > 0
-      ? await prisma.whatsappJidAlias.findMany({
-          where: {
-            sessionId,
-            aliasJid: { in: lidJids },
-          },
-          select: { aliasJid: true, canonicalJid: true, name: true },
-        })
-      : [];
-
-  const aliasByLid = new Map(
-    aliases.map((alias) => [alias.aliasJid, alias]),
+  const contactNames = await resolveContactNames(
+    sessionId,
+    conversations.map((conversation) => conversation.jid),
   );
-
-  const allJidsToLookup = [
-    ...nonGroupJids,
-    ...aliases.map((alias) => alias.canonicalJid),
-  ];
-
-  const contactNames = await getContactNames(sessionId, allJidsToLookup);
 
   return {
     data: conversations.map((conversation) => {
@@ -517,14 +582,10 @@ export const listConversations = async (sessionId, { limit, offset }) => {
         };
       }
 
-      const alias = aliasByLid.get(conversation.jid);
-
       const contactName =
         contactNames.get(conversation.jid) ||
-        (alias ? contactNames.get(alias.canonicalJid) : null) ||
-        alias?.name ||
         conversation.name?.trim() ||
-        resolveDisplayName(conversation.jid);
+        resolveFallbackDisplayName(conversation.jid);
 
       return {
         jid: conversation.jid,

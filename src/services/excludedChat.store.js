@@ -1,4 +1,8 @@
 import { prisma } from "../lib/prisma.js";
+import {
+  resolveContactNames,
+  resolveFallbackDisplayName,
+} from "./chat.store.js";
 
 /**
  * Mengembalikan Set berisi JID chat yang disembunyikan untuk sebuah sesi.
@@ -12,73 +16,52 @@ export const getExcludedJidSet = async (sessionId) => {
   return new Set(excludedChats.map((excludedChat) => excludedChat.jid));
 };
 
+/**
+ * Daftar chat tersembunyi beserta nama tampilannya.
+ *
+ * Kontak memakai resolver yang sama dengan daftar percakapan agar nama dari
+ * buku kontak perangkat utama yang tampil. Nama grup tidak ada di buku kontak
+ * dan baris percakapannya sudah dihapus saat chat disembunyikan, sehingga
+ * dipakai snapshot nama yang disimpan ketika chat disembunyikan.
+ */
 export const listExcludedChats = async (sessionId) => {
   const excludedChats = await prisma.whatsappExcludedChat.findMany({
     where: { sessionId },
     orderBy: { createdAt: "desc" },
   });
 
-  const excludedJids = excludedChats.map((excludedChat) => excludedChat.jid);
-
-  const contacts = await prisma.whatsappContact.findMany({
-    where: {
-      sessionId,
-      jid: { in: excludedJids },
-    },
-    select: { jid: true, name: true },
-  });
-
-  const lidJids = excludedJids.filter((jid) => jid.endsWith("@lid"));
-
-  const aliases =
-    lidJids.length > 0
-      ? await prisma.whatsappJidAlias.findMany({
-          where: {
-            sessionId,
-            aliasJid: { in: lidJids },
-          },
-          select: { aliasJid: true, canonicalJid: true, name: true },
-        })
-      : [];
-
-  const aliasByLid = new Map(
-    aliases.map((alias) => [alias.aliasJid, alias]),
+  const contactNames = await resolveContactNames(
+    sessionId,
+    excludedChats.map((excludedChat) => excludedChat.jid),
   );
 
-  const aliasCanonicalJids = aliases.map((alias) => alias.canonicalJid);
+  return excludedChats.map((excludedChat) => ({
+    id: excludedChat.id,
+    sessionId: excludedChat.sessionId,
+    jid: excludedChat.jid,
+    name:
+      contactNames.get(excludedChat.jid) ||
+      excludedChat.name?.trim() ||
+      resolveFallbackDisplayName(excludedChat.jid),
+    hasStoredName: Boolean(
+      contactNames.get(excludedChat.jid) || excludedChat.name?.trim(),
+    ),
+    createdAt: excludedChat.createdAt,
+  }));
+};
 
-  const aliasContacts =
-    aliasCanonicalJids.length > 0
-      ? await prisma.whatsappContact.findMany({
-          where: {
-            sessionId,
-            jid: { in: aliasCanonicalJids },
-          },
-          select: { jid: true, name: true },
-        })
-      : [];
+/**
+ * Menyimpan snapshot nama untuk chat tersembunyi yang belum punya nama,
+ * misalnya grup yang disembunyikan sebelum kolom nama tersedia.
+ */
+export const updateExcludedChatName = async (sessionId, jid, name) => {
+  if (!name?.trim()) {
+    return;
+  }
 
-  const contactNameByJid = new Map([
-    ...contacts.map((contact) => [contact.jid, contact.name]),
-    ...aliasContacts.map((contact) => [contact.jid, contact.name]),
-  ]);
-
-  return excludedChats.map((excludedChat) => {
-    const alias = aliasByLid.get(excludedChat.jid);
-
-    const resolvedName =
-      contactNameByJid.get(excludedChat.jid) ||
-      (alias ? contactNameByJid.get(alias.canonicalJid) : null) ||
-      alias?.name ||
-      "";
-
-    return {
-      id: excludedChat.id,
-      sessionId: excludedChat.sessionId,
-      jid: excludedChat.jid,
-      name: resolvedName,
-      createdAt: excludedChat.createdAt,
-    };
+  await prisma.whatsappExcludedChat.updateMany({
+    where: { sessionId, jid },
+    data: { name: name.trim() },
   });
 };
 
@@ -100,10 +83,22 @@ export const isChatExcluded = async (sessionId, jid) => {
  * tidak lagi tampil di daftar dan berhenti memakan storage media.
  */
 export const addExcludedChat = async (sessionId, jid) => {
+  /**
+   * Nama percakapan diambil SEBELUM barisnya dihapus di bawah. Untuk grup,
+   * ini satu-satunya sumber nama yang tersisa setelah chat disembunyikan.
+   */
+  const conversation = await prisma.whatsappConversation.findUnique({
+    where: { sessionId_jid: { sessionId, jid } },
+    select: { name: true },
+  });
+  const contactNames = await resolveContactNames(sessionId, [jid]);
+  const snapshotName =
+    contactNames.get(jid) || conversation?.name?.trim() || "";
+
   await prisma.whatsappExcludedChat.upsert({
     where: { sessionId_jid: { sessionId, jid } },
-    create: { sessionId, jid },
-    update: {},
+    create: { sessionId, jid, name: snapshotName },
+    update: snapshotName ? { name: snapshotName } : {},
   });
 
   await prisma.whatsappConversation.deleteMany({
