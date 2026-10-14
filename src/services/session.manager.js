@@ -31,6 +31,7 @@ import {
   addChatMessage,
   clearSessionChatCache,
   findCallMessageId,
+  findStoredCall,
   getContactNames,
   isViewOncePlaceholderStored,
   resolveContactNames,
@@ -48,6 +49,7 @@ import {
 import { isChatExcluded } from "./excludedChat.store.js";
 import { createCallLogTappedLogger } from "../lib/callLogTap.js";
 import { createSerialQueue } from "../lib/serialQueue.js";
+import { isAnsweredTerminate } from "../lib/callState.js";
 
 /**
  * Menyimpan seluruh sesi WhatsApp aktif dalam memori.
@@ -1001,10 +1003,31 @@ const createCallHandler = (sessionId) => {
       const previousCall = activeCalls.get(callKey);
       const callDate = new Date(callEvent.date || Date.now());
       const isNewCallAttempt = callEvent.status === "offer" || !previousCall;
+      const isTerminalEvent = ["terminate", "reject", "timeout"].includes(
+        callEvent.status,
+      );
+
+      /**
+       * Riwayat app-state membawa hasil dan durasi final. Bila sudah tersimpan,
+       * event yang datang belakangan (mis. `terminate` yang terlambat) tidak
+       * boleh menimpanya dengan data yang lebih miskin.
+       */
+      const storedCall = await findStoredCall(sessionId, callEvent.id);
+
+      if (storedCall?.call?.source === "call_log") {
+        if (isTerminalEvent) {
+          activeCalls.delete(callKey);
+        }
+
+        continue;
+      }
+
       const callState = {
-        messageId: isNewCallAttempt
-          ? `call:${callEvent.id}:${callDate.getTime()}`
-          : previousCall.messageId,
+        messageId:
+          storedCall?.whatsappId ??
+          (isNewCallAttempt
+            ? `call:${callEvent.id}:${callDate.getTime()}`
+            : previousCall.messageId),
         acceptedAt:
           callEvent.status === "accept"
             ? callDate
@@ -1014,8 +1037,26 @@ const createCallHandler = (sessionId) => {
 
       activeCalls.set(callKey, callState);
 
+      /**
+       * `terminate` pada panggilan masuk yang diangkat di ponsel utama tiba saat
+       * panggilan DIANGKAT, bukan saat selesai. Dicatat sebagai `accept`
+       * (berlangsung) sampai riwayat app-state membawa hasil dan durasi final.
+       */
+      const isIncomingCall =
+        !callEvent.isGroup && !isSelfConversation && !isOutgoingCall;
+      const isAnsweredElsewhere = isAnsweredTerminate({
+        status: callEvent.status,
+        isIncoming: isIncomingCall,
+        isGroup: Boolean(callEvent.isGroup),
+        acceptedAt: callState.acceptedAt,
+        callDate,
+      });
+      const storedStatus = isAnsweredElsewhere ? "accept" : callEvent.status;
+
       const durationSeconds =
-        callEvent.status === "terminate" && callState.acceptedAt
+        callEvent.status === "terminate" &&
+        callState.acceptedAt &&
+        !isAnsweredElsewhere
           ? Math.max(0, Math.round((callDate - callState.acceptedAt) / 1000))
           : null;
       let conversationName = "";
@@ -1052,10 +1093,11 @@ const createCallHandler = (sessionId) => {
             );
       const call = {
         id: callEvent.id,
-        status: callEvent.status,
+        status: storedStatus,
         isVideo: callState.isVideo,
         isGroup: Boolean(callEvent.isGroup),
         durationSeconds,
+        source: "event",
       };
       const chatMessage = {
         id: callState.messageId,
@@ -1116,7 +1158,7 @@ const createCallHandler = (sessionId) => {
         await publishChatUpdate(callerSessionId, callerChatMessage);
       }
 
-      if (["terminate", "reject", "timeout"].includes(callEvent.status)) {
+      if (isTerminalEvent) {
         activeCalls.delete(callKey);
       }
     }
@@ -1311,6 +1353,7 @@ const createCallLogHandler = (sessionId) => {
         isVideo,
         isGroup,
         durationSeconds: durationSeconds > 0 ? durationSeconds : null,
+        source: "call_log",
       },
       fromMe: !isIncoming,
       sentAt: callDate.toISOString(),

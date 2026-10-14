@@ -1,5 +1,6 @@
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
+import { normalizeCallForDisplay } from "../lib/callState.js";
 import { extractNumberFromJid } from "../lib/phoneNumber.js";
 import {
   resolveContactNames,
@@ -94,7 +95,8 @@ export const listTodayCalls = async (sessionId) => {
   );
 
   const data = callMessages.map((callMessage) => {
-    const call = callMessage.call || {};
+    const call =
+      normalizeCallForDisplay(callMessage.call, callMessage.sentAt) || {};
 
     return {
       id: callMessage.whatsappId,

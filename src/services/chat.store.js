@@ -4,6 +4,7 @@ import { prisma } from "../lib/prisma.js";
 import { extractNumberFromJid } from "../lib/phoneNumber.js";
 import { getExcludedJidSet } from "./excludedChat.store.js";
 import { extractCloudName, getActiveCloudName } from "./media.service.js";
+import { normalizeCallForDisplay } from "../lib/callState.js";
 
 /**
  * Menandai media yang diunggah ke akun Cloudinary LAIN dari yang aktif
@@ -80,7 +81,7 @@ const serializeMessage = (message) => ({
   media: decorateMedia(message.media),
   replyTo: message.replyTo,
   mentions: message.mentions,
-  call: message.call,
+  call: normalizeCallForDisplay(message.call, message.sentAt),
   fromMe: message.fromMe,
   sentAt: message.sentAt.toISOString(),
   receivedAt: message.receivedAt?.toISOString() || null,
@@ -667,6 +668,30 @@ export const listConversationMessages = async (
       nextOffset: offset + messages.length,
     },
   };
+};
+
+/**
+ * Mengambil baris pesan panggilan yang sudah tersimpan untuk sebuah `callId`,
+ * lengkap dengan isi `call`-nya. Dipakai agar event yang datang belakangan
+ * tidak menimpa data akhir yang lebih akurat dari riwayat app-state.
+ */
+export const findStoredCall = async (sessionId, callId) => {
+  if (!sessionId || !callId) {
+    return null;
+  }
+
+  const storedMessage = await prisma.whatsappMessage.findFirst({
+    where: {
+      sessionId,
+      messageType: "call",
+      whatsappId: { startsWith: `call:${callId}:` },
+    },
+    select: { whatsappId: true, call: true },
+  });
+
+  return storedMessage
+    ? { whatsappId: storedMessage.whatsappId, call: storedMessage.call }
+    : null;
 };
 
 /**
